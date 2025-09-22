@@ -6,6 +6,10 @@ import json
 import re
 import traceback
 from dotenv import load_dotenv
+import sys
+
+#st.write(f"Python Executable: {sys.executable}")
+#st.write(f"Sys Path: {sys.path}")
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import AgentExecutor, create_react_agent
@@ -21,65 +25,60 @@ load_dotenv()
 # --- Helper: parse action input robustly ---
 def parse_action_input(tool_input):
     """
-    Accepts tool_input which may be:
-      - a dict (already structured)
-      - a JSON string
-      - a comma-separated 'key=value' string
-      - 'key: value' or 'key value' forms
-    Returns dict with keys or raises ValueError.
+    Parses the tool_input, which is expected to be a JSON string,
+    potentially wrapped in markdown code blocks.
     """
-    keys = [
-        "lon_min", "lon_max", "lat_min", "lat_max",
-        "depth_min", "depth_max", "date_start", "date_end"
-    ]
-
-    # If already dict-like, normalize keys and return
     if isinstance(tool_input, dict):
-        return {k: str(tool_input.get(k)) for k in keys if k in tool_input}
+        return tool_input
+
+    s = str(tool_input).strip()
+    
+    # Clean the string if it's wrapped in markdown json block
+    if s.startswith("```json"):
+        s = s[7:]
+    if s.startswith("```"):
+        s = s[3:]
+    if s.endswith("```"):
+        s = s[:-3]
+    s = s.strip()
+
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to decode JSON from tool input: {s}. Error: {e}")
+
+def parse_bgc_tool_input(tool_input):
+    """
+    Parses the tool_input for the BGC tool, which is expected to be a JSON string
+    with a "parameter" key.
+    """
+    if isinstance(tool_input, dict):
+        if "parameter" in tool_input:
+            return tool_input["parameter"]
+        else:
+            raise ValueError("Input dictionary is missing the 'parameter' field.")
 
     s = str(tool_input).strip()
 
-    # 1) try strict JSON
+    # Clean the string if it's wrapped in markdown json block
+    if s.startswith("```json"):
+        s = s[7:]
+    if s.startswith("```"):
+        s = s[3:]
+    if s.endswith("```"):
+        s = s[:-3]
+    s = s.strip()
+
     try:
         obj = json.loads(s)
-        if isinstance(obj, dict):
-            return {k: str(obj.get(k)) for k in keys if k in obj}
-    except Exception:
-        pass
+        if isinstance(obj, dict) and "parameter" in obj:
+            return obj["parameter"]
+        else:
+            raise ValueError("Parsed JSON is missing the 'parameter' field.")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to decode JSON from tool input: {s}. Error: {e}")
 
-    # 2) try to find patterns like key=val, key: val, "key": val, or key val
-    result = {}
-    for k in keys:
-        # Try key = "value" or key: "value"
-        m = re.search(rf'{re.escape(k)}\s*[:=]\s*["\']?([^\s,"\']+)["\']?', s, flags=re.IGNORECASE)
-        if m:
-            result[k] = m.group(1)
-            continue
-        # Try key <space> value (e.g., "date_start 2022-08-01")
-        m2 = re.search(rf'{re.escape(k)}\s+([^\s,]+)', s, flags=re.IGNORECASE)
-        if m2:
-            result[k] = m2.group(1)
-            continue
-
-    # 3) fallback: split by commas and parse key=value pairs
-    if not result:
-        parts = re.split(r',|\n', s)
-        for p in parts:
-            if '=' in p:
-                k, v = p.split('=', 1)
-                k = k.strip()
-                v = v.strip().strip('"').strip("'")
-                if k in keys:
-                    result[k] = v
-
-    # 4) final check: ensure we have all keys
-    missing = [k for k in keys if k not in result]
-    if missing:
-        raise ValueError(f"Missing required fields in tool input: {missing}. Received raw input: {s}")
-
-    return result
-
-# --- The tool (no args_schema so the agent can send free-form input) ---
+# --- Tools ---
 @tool()
 def fetch_argo_data_by_region(tool_input):
     """
@@ -105,7 +104,7 @@ def fetch_argo_data_by_region(tool_input):
             depth_min, depth_max, date_start, date_end
         ]
 
-        ds = DataFetcher().region(box_numeric).to_xarray()
+        ds = DataFetcher(fs_opts={'timeout': 60}).region(box_numeric).to_xarray()
         df = ds.to_dataframe()
         if df.empty:
             return "No data found for the specified region and time."
@@ -144,20 +143,70 @@ def fetch_argo_data_by_region(tool_input):
         tb = traceback.format_exc()
         return f"Error fetching data: {e}\nTraceback:\n{tb}"
 
+@tool()
+def generate_bgc_parameter_map(tool_input):
+    """
+    Generates a world map showing the data quality for a given BGC parameter.
+    tool_input should be a JSON object with a "parameter" key, e.g., {"parameter": "DOXY"}.
+    """
+    try:
+        parameter = parse_bgc_tool_input(tool_input)
+        if not parameter:
+            raise ValueError("Input is missing the 'parameter' field.")
+
+        from argopy import ArgoIndex
+        from argopy.plot import scatter_map
+        import matplotlib.pyplot as plt
+
+        # Load the BGC index
+        idx = ArgoIndex(index_file='bgc-b').load()
+
+        # Search for the parameter
+        idx.search_param(parameter)
+        if idx.N_MATCH == 0:
+            return f"No data found for the BGC parameter: {parameter}"
+
+        # Convert to DataFrame and extract data mode
+        df = idx.to_dataframe()
+        df["variables"] = df["parameters"].apply(lambda x: x.split())
+        df[f"{parameter}_DM"] = df.apply(lambda x: x['parameter_data_mode'][x['variables'].index(parameter)] if parameter in x['variables'] else '', axis=1)
+
+        # Generate the map
+        fig, ax = scatter_map(df,
+                                hue=f"{parameter}_DM",
+                                cmap="data_mode",
+                                figsize=(10, 6),
+                                markersize=5)
+        ax.set_title(f"Global Data Mode for BGC Parameter: {parameter}")
+
+        # Save the map to a file
+        image_path = "bgc_map.png"
+        plt.savefig(image_path)
+        plt.close(fig) # Close the figure to free up memory
+
+        return f"Map generated and saved to {image_path}"
+    except ValueError as ve:
+        return f"Input parsing error: {ve}"
+    except Exception as e:
+        tb = traceback.format_exc()
+        return f"Error generating map: {e}\nTraceback:\n{tb}"
+
 # --- LLM + Agent setup ---
 
 # Initialize the LLM
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
 
 # Define the list of tools available to the agent
-tools = [fetch_argo_data_by_region]
+tools = [fetch_argo_data_by_region, generate_bgc_parameter_map]
 
 # Improve the prompt to ask the agent to emit JSON for action inputs
 react_prompt_template = '''Answer the following questions as best you can. Your final answer should be a comprehensive summary of your findings, incorporating the details from the observations you have made. You have access to the following tools:
 
 {tools}
 
-IMPORTANT: When you call a tool, the "Action Input" MUST be a valid JSON object with these exact fields:
+When you call a tool, the "Action Input" MUST be a valid JSON object corresponding to the tool's arguments.
+
+If you are using `fetch_argo_data_by_region`, the JSON must contain these fields:
   {{
     "lon_min": <number>,
     "lon_max": <number>,
@@ -169,8 +218,10 @@ IMPORTANT: When you call a tool, the "Action Input" MUST be a valid JSON object 
     "date_end": "YYYY-MM-DD"
   }}
 
-Example of a valid Action Input:
-Action Input: {{ "lon_min": -125, "lon_max": -117, "lat_min": 32, "lat_max": 42, "depth_min": 0, "depth_max": 2000, "date_start": "2022-08-01", "date_end": "2022-08-31" }}
+If you are using `generate_bgc_parameter_map`, the JSON must contain this field:
+  {{
+    "parameter": "The BGC parameter to visualize (e.g., 'DOXY', 'BBP700')"
+  }}
 
 Use the following format:
 
@@ -209,6 +260,8 @@ if "messages" not in st.session_state:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        if "image" in message:
+            st.image(message["image"])
 
 # Handle user input
 if prompt_text := st.chat_input("Ask about ARGO float data..."):
@@ -222,7 +275,13 @@ if prompt_text := st.chat_input("Ask about ARGO float data..."):
         with st.spinner("Thinking..."):
             response = agent_executor.invoke({"input": prompt_text})
             response_text = response.get("output", "I encountered an error.")
-            st.markdown(response_text)
-
-    # Add assistant response to history
-    st.session_state.messages.append({"role": "assistant", "content": response_text})
+            
+            # Check if the response contains a path to a generated map
+            if "Map generated and saved to" in response_text:
+                image_path = response_text.split("Map generated and saved to")[-1].strip()
+                st.markdown("Here is the map you requested:")
+                st.image(image_path)
+                st.session_state.messages.append({"role": "assistant", "content": "Here is the map you requested:", "image": image_path})
+            else:
+                st.markdown(response_text)
+                st.session_state.messages.append({"role": "assistant", "content": response_text})

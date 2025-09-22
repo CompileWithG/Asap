@@ -1,93 +1,13 @@
-Problem Statement title:FloatChat - AI-Powered Conversational Interface for ARGO Ocean Data Discovery and Visualization
+FloatChat 🌊 - ARGO Ocean Data Assistant
+Is there any data near the coast of California in August 2022?
 
-Problem Statement description:
-Background
+Yes, there is Argo data near the coast of California in August 2022. The query, encompassing longitudes -125 to -117 and latitudes 32 to 42, between depths of 0 and 2000 meters, and spanning August 1st to 31st, 2022, yielded 9 Argo float profiles. The observed temperature ranged from 1.97 to 19.53 degrees Celsius, and salinity ranged from 32.35 to 34.62. This indicates the presence of oceanographic data within the specified region and timeframe.
 
-Oceanographic data is vast, complex, and heterogeneous – ranging from satellite observations to in-situ measurements like CTD casts, Argo floats, and BGC sensors. The Argo program, which deploys autonomous profiling floats across the world’s oceans, generates an extensive dataset in NetCDF format containing temperature, salinity, and other essential ocean variables. Accessing, querying, and visualizing this data requires domain knowledge, technical skills, and familiarity with complex formats and tools. With the rise of AI and Large Language Models (LLMs), especially when combined with modern structured databases and interactive dashboards, it is now feasible to create intuitive, accessible systems that democratize access to ocean data.
+Show me data for the Arabian Sea for the first week of 2023, up to 50 meters deep
 
-Description
-
-The current problem statement proposes the development of an AI-powered conversational system for ARGO float data that enables users to query, explore, and visualize oceanographic information using natural language.
-
-The current system shall:
-− Ingest ARGO NetCDF files and convert them into structured formats (like SQL/Parquet).
-− Use a vector database (like FAISS/Chroma) to store metadata and summaries for retrieval.
-− Leverage Retrieval-Augmented Generation (RAG) pipelines powered by multimodal LLMs (such as GPT, QWEN, LLaMA, or Mistral) to interpret user queries and map them to database queries (SQL). (Use Model Context Protocol (MCP))
-− Enable interactive dashboards (via Streamlit or Dash) for visualization of ARGO profiles, such as mapped trajectories, depth-time plots, and profile comparisons, etc.
-− Provide a chatbot-style interface where users can ask questions like:
-  • Show me salinity profiles near the equator in March 2023
-  • Compare BGC parameters in the Arabian Sea for the last 6 months
-  • What are the nearest ARGO floats to this location?
-
-This tool will bridge the gap between domain experts, decision-makers, and raw data by allowing non-technical users to extract meaningful insights effortlessly.
-
-Expected Solution
-
-− End-to-end pipeline to process ARGO NetCDF data and store it in a relational (PostgreSQL) and vector database (FAISS/Chroma).
-− Backend LLM system that translates natural language into database queries and generates responses using RAG.
-− Frontend dashboard with geospatial visualizations (using Plotly, Leaflet, or Cesium) and tabular summaries to ASCII, NetCDF.
-− Chat interface that understands user intent and guides them through data discovery.
-− Demonstrate a working Proof-of-Concept (PoC) with Indian Ocean ARGO data and future extensibility to in-situ observations (BGC, glider, buoys, etc.), and satellite datasets.
-
-Acronyms
-
-NetCDF: Network Common Data Format
-CTD: Conductivity Temperature and Depth
-BGC: Bio-Geo-Chemical Floats
+ARGO float data from the Arabian Sea (10°E to 70°E longitude, 10°N to 25°N latitude) for the first week of 2023 (January 1st to 7th) and up to 50 meters depth reveals the following: Data was successfully retrieved from 14 ARGO float profiles between January 1st and 6th, 2023. The observed temperature ranged from 23.27°C to 26.94°C, while salinity ranged from 16.61 to 36.83. Note that the data only covers the period up to January 6th, not the full 7th.
 
 
 
 
-Me and My team have have to show a minimum viable product of this problem statment tommrow-that means a website where the user can come and query data related to oceanographic data
-now me and my team has decided to make a website using langchain framework+google gemini api+argopy library(that does majority of the data storing and processing work for now ) ,this is just a temperoroy solution to show to the panel judges tommorow,we are not intending to use this library as a permenant solution
-but because it gets the work done for now ,we intend to use this library for our initial prototype,this below is a glimpse of how the library works:
-Documentation
-The official documentation is hosted on ReadTheDocs.org: https://argopy.readthedocs.io
-
-Install
-Binary installers for the latest released version are available at the Python Package Index (PyPI) and on Conda.
-
-# conda
-conda install -c conda-forge argopy
-# or PyPI
-pip install argopy
-argopy is continuously tested to work under most OS (Linux, Mac, Windows) and with python versions >= 3.8
-
-Usage
-# Import the main data fetcher:
-from argopy import DataFetcher
-# Define what you want to fetch... 
-# a region:
-ArgoSet = DataFetcher().region([-85,-45,10.,20.,0,10.])
-# floats:
-ArgoSet = DataFetcher().float([6902746, 6902747, 6902757, 6902766])
-# or specific profiles:
-ArgoSet = DataFetcher().profile(6902746, 34)
-# then fetch and get data as xarray datasets:
-ds = ArgoSet.load().data
-# or
-ds = ArgoSet.to_xarray()
-# you can even plot some information:
-ArgoSet.plot('trajectory')    
-They are many more usages and fine-tuning to allow you to access and manipulate Argo data:
-
-filters at fetch time (standard vs expert users, automatically select QC flags or data mode, ...)
-select data sources (erddap, ftp, local, argovis, ...)
-manipulate data (points, profiles, interpolations, binning, ...)
-visualisation (trajectories, topography, histograms, ...)
-tools for Quality Control (OWC, figures, ...)
-access meta-data and other Argo-related datasets (reference tables, deployment plans, topography, DOIs, ...)
-improve performances (caching, parallel data fetching)
-Just check out the documentation for more !
-
-
-
-now create a  very detailed step by step ToDO/Documentation.md file that contains all technical details to be implemented and all work to be done to be done detailed very granularly and in an organizeed way breaking down the work into small important bits
-
-also keep in mind the goal is to have a website that is the chatGPT for ocean float data,the user can come and ask questions related to oceanographic data and get data in readable and understandle format along with graphs,plots,data visualisation that helps
-the user get a very good understanding of the wast amount of data regarding to the user query
-
-
-
-
-generate the .md file now 
+this shows the current working state/status of FloatChat AI chatbot
