@@ -157,34 +157,32 @@ def generate_bgc_parameter_map(tool_input):
         from argopy import ArgoIndex
         from argopy.plot import scatter_map
         import matplotlib.pyplot as plt
+        import plotly.express as px
 
-        # Load the BGC index
         idx = ArgoIndex(index_file='bgc-b').load()
 
-        # Search for the parameter
-        idx.search_param(parameter)
-        if idx.N_MATCH == 0:
-            return f"No data found for the BGC parameter: {parameter}"
+        x=idx.read_params(parameter)
 
-        # Convert to DataFrame and extract data mode
-        df = idx.to_dataframe()
+        if not x:
+            return f"No data found for the BGC parameter: {parameter}"
+        
+        df = idx.to_dataframe() 
+
         df["variables"] = df["parameters"].apply(lambda x: x.split())
         df[f"{parameter}_DM"] = df.apply(lambda x: x['parameter_data_mode'][x['variables'].index(parameter)] if parameter in x['variables'] else '', axis=1)
 
-        # Generate the map
-        fig, ax = scatter_map(df,
-                                hue=f"{parameter}_DM",
-                                cmap="data_mode",
-                                figsize=(10, 6),
-                                markersize=5)
-        ax.set_title(f"Global Data Mode for BGC Parameter: {parameter}")
+        df['DM_num'] = df[f"{parameter}_DM"].map({'R':0,'A':1,'D':2})
 
-        # Save the map to a file
-        image_path = "bgc_map.png"
-        plt.savefig(image_path)
-        plt.close(fig) # Close the figure to free up memory
+        fig = px.scatter_geo(df, 
+                            lat='latitude', lon='longitude',
+                            color='DM_num',
+                            color_continuous_scale='Viridis',
+                            title=f"Global Data Mode for BGC Parameter: {parameter}")
+        
+        image_path = "bgc_map_plotly.png"
+        fig.write_image(image_path)
 
-        return f"Map generated and saved to {image_path}"
+        return f"✅ SUCCESS: Map generated and saved to {image_path}. Found {len(df)} profiles with {parameter} data."
     except ValueError as ve:
         return f"Input parsing error: {ve}"
     except Exception as e:
@@ -194,7 +192,7 @@ def generate_bgc_parameter_map(tool_input):
 # --- LLM + Agent setup ---
 
 # Initialize the LLM
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
 
 # Define the list of tools available to the agent
 tools = [fetch_argo_data_by_region, generate_bgc_parameter_map]
@@ -223,6 +221,12 @@ If you are using `generate_bgc_parameter_map`, the JSON must contain this field:
     "parameter": "The BGC parameter to visualize (e.g., 'DOXY', 'BBP700')"
   }}
 
+IMPORTANT STOPPING CONDITIONS:
+- If you receive a "✅ SUCCESS" observation from any tool, immediately proceed to "Final Answer"
+- If a map/visualization is generated successfully then provide the path of the image in the output result, do NOT repeat the same action
+- If you get data from ARGO floats, analyze it and provide your Final Answer
+- Do NOT call the same tool multiple times with the same parameters and get in a loop.
+  
 Use the following format:
 
 Question: the input question you must answer
@@ -245,7 +249,7 @@ prompt = PromptTemplate.from_template(react_prompt_template)
 agent = create_react_agent(llm, tools, prompt)
 
 # Create the Agent Executor which will run the agent
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True,max_iterations=3,early_stopping_method="force",handle_parsing_errors=True,return_intermediate_steps=True)
 
 
 # --- Streamlit frontend ---
@@ -261,7 +265,13 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if "image" in message:
-            st.image(message["image"])
+            try:
+                if os.path.exists(message["image"]):
+                    st.image(message["image"])
+                else:
+                    st.warning(f"Image file not found: {message['image']}")
+            except Exception as e:
+                st.error(f"Error displaying image: {e}")
 
 # Handle user input
 if prompt_text := st.chat_input("Ask about ARGO float data..."):
@@ -276,12 +286,71 @@ if prompt_text := st.chat_input("Ask about ARGO float data..."):
             response = agent_executor.invoke({"input": prompt_text})
             response_text = response.get("output", "I encountered an error.")
             
-            # Check if the response contains a path to a generated map
-            if "Map generated and saved to" in response_text:
-                image_path = response_text.split("Map generated and saved to")[-1].strip()
-                st.markdown("Here is the map you requested:")
-                st.image(image_path)
-                st.session_state.messages.append({"role": "assistant", "content": "Here is the map you requested:", "image": image_path})
+            # Display response text first
+            st.markdown(response_text)
+            
+            # Better image path extraction - look for specific patterns
+            image_path = None
+            
+            # Try multiple patterns to find the image path
+            image_patterns = [
+                r"saved to ([^\s,;]+\.png)",  # "saved to filename.png"
+                r"saved to ([^\s,;]+\.jpg)",  # "saved to filename.jpg" 
+                r"saved to ([^\s,;]+\.html)", # "saved to filename.html"
+                r"Map generated and saved to ([^\s,;.]+\.png)", # More specific pattern
+                r"([a-zA-Z_][a-zA-Z0-9_]*\.png)",  # Simple filename.png
+                r"([a-zA-Z_][a-zA-Z0-9_]*\.jpg)",  # Simple filename.jpg
+            ]
+
+            
+            for pattern in image_patterns:
+                match = re.search(pattern, response_text)
+                if match:
+                    image_path = match.group(1).strip()
+                    break
+            
+            if image_path:
+                
+                paths_to_try = [
+                    image_path,  # Original path
+                    os.path.abspath(image_path),  # Absolute path
+                    os.path.join(os.getcwd(), image_path),  # Join with current dir
+                    os.path.join(os.getcwd(), os.path.basename(image_path))  # Just filename in current dir
+                ]
+                
+                image_displayed = False
+                for path_attempt in paths_to_try:
+                    if os.path.exists(path_attempt):
+                        try:
+                            if path_attempt.endswith('.png') or path_attempt.endswith('.jpg'):
+                                st.image(path_attempt, caption="Generated Map", use_container_width=True)
+                                st.session_state.messages.append({
+                                    "role": "assistant", 
+                                    "content": response_text, 
+                                    "image": path_attempt
+                                })
+                                image_displayed = True
+                                break
+                            elif path_attempt.endswith('.html'):
+                                with open(path_attempt, 'r') as f:
+                                    html_content = f.read()
+                                st.components.v1.html(html_content, height=600)
+                                st.success("🎉 Interactive map displayed successfully!")
+                                st.session_state.messages.append({
+                                    "role": "assistant", 
+                                    "content": response_text + f"\n\nInteractive map: {path_attempt}"
+                                })
+                                image_displayed = True
+                                break
+                        except Exception as e:
+                            st.error(f"❌ Error displaying image `{path_attempt}`: {e}")
+                            continue
+                    else:
+                        st.write(f"❌ File not found: `{path_attempt}`")
+                
+                if not image_displayed:
+                    st.warning("⚠️ Could not display image - file not found in any expected location")
+                    st.session_state.messages.append({"role": "assistant", "content": response_text})
             else:
-                st.markdown(response_text)
+                st.write("ℹ️ No image path detected in response")
                 st.session_state.messages.append({"role": "assistant", "content": response_text})
