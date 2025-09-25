@@ -17,3 +17,25 @@ is limited to the temperature and salinity ranges from the successful data fetch
 
 
 
+🔹 2. Interactive Web Maps
+
+If you want an interactive element (zoomable map) for a website:
+
+folium
+
+Python wrapper around Leaflet.js (super popular for web maps).
+
+Generates an interactive HTML map you can embed directly.
+
+import folium
+
+m = folium.Map(location=[latitude, longitude], zoom_start=6)
+folium.Marker([latitude, longitude], popup="Here!").add_to(m)
+m.save("map.html")
+
+
+(Then embed map.html in your website.)
+
+ipyleaflet (for Jupyter or dynamic dashboards)
+
+More interactive in notebooks or dashboards.

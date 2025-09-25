@@ -14,6 +14,7 @@ from argopy.plot import scatter_map
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
+import folium
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import AgentExecutor, create_react_agent
@@ -107,7 +108,7 @@ def fetch_argo_data_by_region_plot(tool_input):
     Make sure to include only those plot options int plot_opt which are neccesary for the data fetched and are valid for the data fetched. We dont want to maximize the number of plots but we want to provide the best possible plots for the data fetched.
     If two plot options visualize the data in similar ways then include only one of them.
     We need to make sure to optimize the number of plots and the quality of plots.Such that the user is not overwhelmed with too many plots and the plots provided are of high quality and provide good insights about the data fetched.
-    If there is a timeout error while fetching the data,then first prioritize decreasing the date range to fetch the data to a smaller range and then if the error still persists then prioritize decreasing the bounding box to a smaller box.
+    If there is a timeout error while fetching the data,then first prioritize decreasing the date range(start date-end date) to fetch the data to a smaller range and then if the error still persists then prioritize decreasing the bounding box to a smaller box.
     Returns a image path.
     """
     try:
@@ -384,7 +385,33 @@ def fetch_argo_data_by_region_plot(tool_input):
                     fig.write_image(image_path)
                     plot_message += f"Plot {parsed['plot_opt']} saved to {image_path}."
 
-        return f"✅ Plots generated in folder out_img {plot_message}"
+        # --- Folium Interactive Map Generation ---
+        map_message = ""
+        if "LATITUDE" in df_reset.columns and "LONGITUDE" in df_reset.columns and not df_reset.empty:
+            try:
+                # Create a folium map centered on the mean coordinates of the data
+                map_center_lat = df_reset["LATITUDE"].mean()
+                map_center_lon = df_reset["LONGITUDE"].mean()
+                
+                m = folium.Map(location=[map_center_lat, map_center_lon], zoom_start=4)
+
+                # Add a marker for the center
+                folium.Marker(
+                    [map_center_lat, map_center_lon], 
+                    popup=f"Approx. center of {len(df_reset)} data points"
+                ).add_to(m)
+
+                # Save map to an HTML file
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                map_filename = f"interactive_map_{timestamp}.html"
+                map_path = os.path.join("out_img", map_filename)
+                m.save(map_path)
+                map_message = f" Interactive map saved to {map_path}."
+            except Exception as e:
+                map_message = f" Could not generate interactive map: {e}"
+        # --- End Folium ---
+
+        return f"✅ Plots generated in folder out_img.{plot_message}{map_message}"
     
     except ValueError as ve:
         return f"Input parsing error: {ve}"
@@ -515,7 +542,7 @@ prompt = PromptTemplate.from_template(react_prompt_template)
 agent = create_react_agent(llm, tools, prompt)
 
 # Create the Agent Executor which will run the agent
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True,max_iterations=3,early_stopping_method="force",handle_parsing_errors=True,return_intermediate_steps=True)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True,max_iterations=10,early_stopping_method="force",handle_parsing_errors=True,return_intermediate_steps=True)
 
 
 # --- Streamlit frontend ---
