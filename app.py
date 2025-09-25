@@ -1,6 +1,7 @@
 # app.py
 import streamlit as st
 import pandas as pd
+import numpy as np
 import os
 import json
 import re
@@ -83,6 +84,92 @@ def parse_bgc_tool_input(tool_input):
     except json.JSONDecodeError as e:
         raise ValueError(f"Failed to decode JSON from tool input: {s}. Error: {e}")
 
+def generate_data_analysis_summary(user_query):
+    """
+    Generate a detailed analysis summary of the fetched ARGO data using LLM
+    """
+    try:
+        if not os.path.exists("argo_data.csv"):
+            return ""
+        
+        df = pd.read_csv("argo_data.csv")
+        if df.empty:
+            return ""
+        
+        # Calculate statistics for all numeric columns
+        stats_summary = []
+        numeric_columns = df.select_dtypes(include=[np.number]).columns
+        
+        for col in numeric_columns:
+            # Skip columns with all NaN values
+            if df[col].isna().all():
+                continue
+                
+            col_stats = {
+                'column': col,
+                'mean': df[col].mean(),
+                'median': df[col].median(),
+                'std': df[col].std(),
+                'min': df[col].min(),
+                'max': df[col].max(),
+                'count': df[col].count(),
+                'null_count': df[col].isna().sum()
+            }
+            
+            # Calculate mode (most frequent value) - handle potential errors
+            try:
+                mode_result = df[col].mode()
+                if not mode_result.empty:
+                    col_stats['mode'] = mode_result.iloc[0]
+                else:
+                    col_stats['mode'] = "No mode"
+            except:
+                col_stats['mode'] = "Unable to calculate"
+            
+            stats_summary.append(col_stats)
+        
+        # Create a formatted statistics string
+        stats_text = "STATISTICAL SUMMARY OF FETCHED ARGO DATA:\n\n"
+        for stat in stats_summary:
+            stats_text += f"{stat['column']}:\n"
+            stats_text += f"  - Mean: {stat['mean']:.4f}\n"
+            stats_text += f"  - Median: {stat['median']:.4f}\n"
+            stats_text += f"  - Mode: {stat['mode']}\n"
+            stats_text += f"  - Standard Deviation: {stat['std']:.4f}\n"
+            stats_text += f"  - Min: {stat['min']:.4f}\n"
+            stats_text += f"  - Max: {stat['max']:.4f}\n"
+            stats_text += f"  - Valid Count: {stat['count']}\n"
+            stats_text += f"  - Null Count: {stat['null_count']}\n\n"
+        
+        # Prepare prompt for LLM analysis
+        analysis_prompt = f"""
+        Based on the following user query and statistical data from ARGO oceanographic floats, provide a detailed, informative explanation of the oceanographic conditions and patterns observed in this data:
+
+        USER QUERY: {user_query}
+
+        {stats_text}
+
+        Please provide an insightful analysis that:
+        1. Explains what these statistics reveal about the oceanographic conditions
+        2. Interprets the temperature, salinity, and pressure patterns if present
+        3. Discusses any notable characteristics or anomalies in the data
+        4. Relates the findings to typical ocean conditions for the queried region/parameters
+        5. Provides context about what these measurements mean for ocean science
+
+        Keep the explanation accessible but scientifically accurate, and focus on the oceanographic significance of the data.
+        """
+        
+        # Initialize LLM for analysis
+        analysis_llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
+        
+        # Get analysis from LLM
+        analysis_response = analysis_llm.invoke(analysis_prompt)
+        
+        return f"\n\n📊 **DATA ANALYSIS SUMMARY:**\n{analysis_response.content}"
+        
+    except Exception as e:
+        return f"\n\n⚠️ Could not generate data analysis summary: {str(e)}"
+
 # --- Tools ---
 @tool()
 def fetch_argo_data_by_region_plot(tool_input):
@@ -112,6 +199,14 @@ def fetch_argo_data_by_region_plot(tool_input):
     Returns a image path.
     """
     try:
+        # Clear the output directory before generating new plots
+        dir_path = "out_img"
+        if os.path.exists(dir_path):
+            for f in os.listdir(dir_path):
+                os.remove(os.path.join(dir_path, f))
+        else:
+            os.makedirs(dir_path)
+
         parsed = parse_action_input(tool_input)
         print(f"Parsed input: {parsed}")
         
@@ -435,6 +530,14 @@ def generate_bgc_parameter_map(tool_input):
     – "Map nitrate observations and highlight validated profiles."
     """
     try:
+        # Clear the output directory before generating new plots
+        dir_path = "out_img"
+        if os.path.exists(dir_path):
+            for f in os.listdir(dir_path):
+                os.remove(os.path.join(dir_path, f))
+        else:
+            os.makedirs(dir_path)
+
         parameter = parse_bgc_tool_input(tool_input)
         if not parameter:
             raise ValueError("Input is missing the 'parameter' field.")
@@ -579,7 +682,20 @@ if prompt_text := st.chat_input("Ask about ARGO float data..."):
             response = agent_executor.invoke({"input": prompt_text})
             response_text = response.get("output", "I encountered an error.")
             
-            # Display response text first
+            # Generate data analysis summary if argo_data.csv exists
+            analysis_summary = generate_data_analysis_summary(prompt_text)
+            
+            # Append analysis summary to response text
+            if analysis_summary:
+                response_text += analysis_summary
+            
+            # Create a comprehensive string to search for file paths from all agent steps
+            text_to_search = response_text
+            if 'intermediate_steps' in response:
+                for action, observation in response['intermediate_steps']:
+                    text_to_search += str(observation)
+
+            # Display the agent's final answer
             st.markdown(response_text)
             
             # Better image path extraction - look for specific patterns
@@ -595,9 +711,8 @@ if prompt_text := st.chat_input("Ask about ARGO float data..."):
                 r"([a-zA-Z_][a-zA-Z0-9_]*\.jpg)",  
             ]
 
-            
             for pattern in image_patterns:
-                match = re.search(pattern, response_text)
+                match = re.search(pattern, text_to_search) # Search the comprehensive text
                 if match:
                     image_path = match.group(1).strip()
                     break
