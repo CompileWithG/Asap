@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
 import folium
+import numpy as np
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import AgentExecutor, create_react_agent
@@ -82,6 +83,92 @@ def parse_bgc_tool_input(tool_input):
             raise ValueError("Parsed JSON is missing the 'parameter' field.")
     except json.JSONDecodeError as e:
         raise ValueError(f"Failed to decode JSON from tool input: {s}. Error: {e}")
+    
+def generate_data_analysis_summary(user_query):
+    """
+    Generate a detailed analysis summary of the fetched ARGO data using LLM
+    """
+    try:
+        if not os.path.exists("argo_data.csv"):
+            return ""
+        
+        df = pd.read_csv("argo_data.csv")
+        if df.empty:
+            return ""
+        
+        # Calculate statistics for all numeric columns
+        stats_summary = []
+        numeric_columns = df.select_dtypes(include=[np.number]).columns
+        
+        for col in numeric_columns:
+            # Skip columns with all NaN values
+            if df[col].isna().all():
+                continue
+                
+            col_stats = {
+                'column': col,
+                'mean': df[col].mean(),
+                'median': df[col].median(),
+                'std': df[col].std(),
+                'min': df[col].min(),
+                'max': df[col].max(),
+                'count': df[col].count(),
+                'null_count': df[col].isna().sum()
+            }
+            
+            # Calculate mode (most frequent value) - handle potential errors
+            try:
+                mode_result = df[col].mode()
+                if not mode_result.empty:
+                    col_stats['mode'] = mode_result.iloc[0]
+                else:
+                    col_stats['mode'] = "No mode"
+            except:
+                col_stats['mode'] = "Unable to calculate"
+            
+            stats_summary.append(col_stats)
+        
+        # Create a formatted statistics string
+        stats_text = "STATISTICAL SUMMARY OF FETCHED ARGO DATA:\n\n"
+        for stat in stats_summary:
+            stats_text += f"{stat['column']}:\n"
+            stats_text += f"  - Mean: {stat['mean']:.4f}\n"
+            stats_text += f"  - Median: {stat['median']:.4f}\n"
+            stats_text += f"  - Mode: {stat['mode']}\n"
+            stats_text += f"  - Standard Deviation: {stat['std']:.4f}\n"
+            stats_text += f"  - Min: {stat['min']:.4f}\n"
+            stats_text += f"  - Max: {stat['max']:.4f}\n"
+            stats_text += f"  - Valid Count: {stat['count']}\n"
+            stats_text += f"  - Null Count: {stat['null_count']}\n\n"
+        
+        # Prepare prompt for LLM analysis
+        analysis_prompt = f"""
+        Based on the following user query and statistical data from ARGO oceanographic floats, provide a detailed, informative explanation of the oceanographic conditions and patterns observed in this data:
+
+        USER QUERY: {user_query}
+
+        {stats_text}
+
+        Please provide an insightful analysis that:
+        1. Explains what these statistics reveal about the oceanographic conditions
+        2. Interprets the temperature, salinity, and pressure patterns if present
+        3. Discusses any notable characteristics or anomalies in the data
+        4. Relates the findings to typical ocean conditions for the queried region/parameters
+        5. Provides context about what these measurements mean for ocean science
+
+        Keep the explanation accessible but scientifically accurate, and focus on the oceanographic significance of the data.
+        """
+        
+        # Initialize LLM for analysis
+        analysis_llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
+        
+        # Get analysis from LLM
+        analysis_response = analysis_llm.invoke(analysis_prompt)
+        
+        return f"\n\n📊 **DATA ANALYSIS SUMMARY:**\n{analysis_response.content}"
+        
+    except Exception as e:
+        return f"\n\n⚠️ Could not generate data analysis summary: {str(e)}"
 
 # --- Tools ---
 @tool()
@@ -105,13 +192,13 @@ def fetch_argo_data_by_region_plot(tool_input):
     while chossing the params like x,y take this points in mind :• Use only these numeric parameters for x–y axes:
     ["PRES","PRES_ERROR","PSAL","PSAL_ERROR","TEMP","TEMP_ERROR","LATITUDE","LONGITUDE","CYCLE_NUMBER","PLATFORM_NUMBER"]
 
-    • TIME can be x but not y.
+    • DATE can be x but not y.
 
     • DATA_MODE, DIRECTION, POSITION_QC, *_QC fields are categorical and
     may be used only on the x-axis of bar/histogram/box/violin/strip plots.
 
-    • Never pair LATITUDE vs LONGITUDE unless the plot type is one of:
-    ["scatter_geo","choropleth","choropleth_mapbox","scatter_mapbox"].
+    • Never pair LATITUDE vs LONGITUDE and TIME as a parameter unless the lat and log plot type is one of:
+    ["scatter_geo","choropleth","choropleth_mapbox","scatter_mapbox"]..
 
     • Each plot must respect these rules or it is invalid.
 
@@ -274,17 +361,16 @@ def fetch_argo_data_by_region_plot(tool_input):
 
         final_count = len(df_reset)
 
-        df_reset.to_csv("argo_data.csv",index=False)
-
+        param_stats = []
         if "TIME" in df_reset.columns:
-            min_date = pd.to_datetime(df_reset["TIME"].min()).strftime("%Y-%m-%d")
-            max_date = pd.to_datetime(df_reset["TIME"].max()).strftime("%Y-%m-%d")
-            date_info = f"between {min_date} and {max_date}"
-        else:
-            date_info = f"in requested period {query_params['date_start']} to {query_params['date_end']}"
+            df_reset['DATE'] = pd.to_datetime(df_reset['TIME']).dt.date
+            df_reset = df_reset.groupby('DATE').first().reset_index()
+            min_date = pd.to_datetime(df_reset["DATE"].min())
+            max_date = pd.to_datetime(df_reset["DATE"].max())
+            param_stats.append(f"Date between {min_date} and {max_date}")
+        
 
         # Parameter ranges
-        param_stats = []
         if "TEMP" in df_reset.columns:
             temp_range = f"{df_reset['TEMP'].min():.2f} to {df_reset['TEMP'].max():.2f}°C"
             param_stats.append(f"🌡️ Temperature: {temp_range}")
@@ -297,6 +383,7 @@ def fetch_argo_data_by_region_plot(tool_input):
             pres_range = f"{df_reset['PRES'].min():.1f} to {df_reset['PRES'].max():.1f} dbar"
             param_stats.append(f"📊 Pressure: {pres_range}")
         
+        df_reset.to_csv("argo_data.csv",index=False)
         if os.path.exists("out_img"):
                 shutil.rmtree("out_img")
 
@@ -306,7 +393,6 @@ def fetch_argo_data_by_region_plot(tool_input):
             plot_item = parsed.get("plot_print")
             plot_message=""  
             fig=None
-            df_reset=df_reset[:50]
             for spec in plot_item:
                 plot = spec.get("type")
                 x  = spec.get("x")
@@ -606,6 +692,18 @@ if prompt_text := st.chat_input("Ask about ARGO float data..."):
             response_text = response.get("output", "I encountered an error.")
             
             # Display response text first
+            analysis_summary = generate_data_analysis_summary(prompt_text)
+            
+            # Append analysis summary to response text
+            if analysis_summary:
+                response_text += analysis_summary
+            
+            # Create a comprehensive string to search for file paths from all agent steps
+            text_to_search = response_text
+            if 'intermediate_steps' in response:
+                for action, observation in response['intermediate_steps']:
+                    text_to_search += str(observation)
+
             st.markdown(response_text)
             
             # Better image path extraction - look for specific patterns
@@ -623,7 +721,7 @@ if prompt_text := st.chat_input("Ask about ARGO float data..."):
 
             
             for pattern in image_patterns:
-                match = re.search(pattern, response_text)
+                match = re.search(pattern, text_to_search)
                 if match:
                     image_path = match.group(1).strip()
                     break
