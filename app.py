@@ -98,9 +98,16 @@ def fetch_argo_data_by_region_plot(tool_input):
     {"platform_number": "2903334"} - Specific float
     {"temp_min": 20, "temp_max": 30} - Temperature range
     {"plot":True} or {"plot":False} - Whether to generate a plot if user asked or if possible for the given query then suggested
-    {"plot_opt":[list of ≥3 and <=5 plotly plot types condition] the list of all possible plots we can use are this = ["scatter","scatter_3d","scatter_polar","scatter_ternary","line","line_3d","line_polar","area","bar","histogram","violin","box","strip","pie","sunburst","treemap","icicle","funnel","funnel_area","density_contour","density_heatmap","scatter_geo","choropleth","choropleth_mapbox","scatter_mapbox","density_mapbox","parallel_coordinates","parallel_categories","imshow"]} - This is very important if ploting whould be done u have to do thisPlotting options for best visualization
-    {"x": "PRES", "y": "TEMP"} - Plotting parameters if plot is True
+    {"plot_opt": ["scatter","scatter_3d","scatter_polar","scatter_ternary","line","line_3d","line_polar","area","bar","histogram","violin","box","strip","pie","sunburst","treemap","icicle","funnel","funnel_area","density_contour","density_heatmap","scatter_geo","choropleth","choropleth_mapbox","scatter_mapbox","density_mapbox","parallel_coordinates","parallel_categories","imshow"]} - Plotting options for best visualization 
 
+    {"x": "PRES", "y": "TEMP"} - Plotting parameters if plot is True
+    whenever plot is True plot_opt must be provided and x and y must be provided
+    In plot_opt the minimum number of plots is 3 regardless of the user prompt,for the data fetched the best three plots will be generated.
+    Make sure to provide valid parameters for x and y that exist in the fetched data.
+    Make sure to include only those plot options int plot_opt which are neccesary for the data fetched and are valid for the data fetched. We dont want to maximize the number of plots but we want to provide the best possible plots for the data fetched.
+    If two plot options visualize the data in similar ways then include only one of them.
+    We need to make sure to optimize the number of plots and the quality of plots.Such that the user is not overwhelmed with too many plots and the plots provided are of high quality and provide good insights about the data fetched.
+    If there is a timeout error while fetching the data,then first prioritize decreasing the date range to fetch the data to a smaller range and then if the error still persists then prioritize decreasing the bounding box to a smaller box.
     Returns a image path.
     """
     try:
