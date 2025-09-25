@@ -14,6 +14,7 @@ from argopy.plot import scatter_map
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
+import folium
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import AgentExecutor, create_react_agent
@@ -124,7 +125,7 @@ def fetch_argo_data_by_region_plot(tool_input):
     ]}
 
     whenever plot is True plot_opt must be provided and x and y must be provided
-    In plot_opt the minimum number of plots is 3 regardless of the user prompt,for the data fetched the best three plots will be generated.
+    In plot_opt the minimum number of plots is 3 for the user prompt unless the query doesnt be explained in visula,for the data fetched the best three plots will be generated.
     Make sure to provide valid parameters for x and y that exist in the fetched data.
     Make sure to include only those plot options int plot_print which are neccesary for the data fetched and are valid for the data fetched. We dont want to maximize the number of plots but we want to provide the best possible plots for the data fetched.
     We need to make sure to optimize the number of plots and the quality of plots.Such that the user is not overwhelmed with too many plots and the plots provided are of high quality and provide good insights about the data fetched.
@@ -273,6 +274,8 @@ def fetch_argo_data_by_region_plot(tool_input):
 
         final_count = len(df_reset)
 
+        df_reset.to_csv("argo_data.csv",index=False)
+
         if "TIME" in df_reset.columns:
             min_date = pd.to_datetime(df_reset["TIME"].min()).strftime("%Y-%m-%d")
             max_date = pd.to_datetime(df_reset["TIME"].max()).strftime("%Y-%m-%d")
@@ -408,7 +411,33 @@ def fetch_argo_data_by_region_plot(tool_input):
                     fig.write_image(image_path)
                     plot_message += f"Plot {plot} saved to {image_path}."
 
-        return f"✅ Plots generated in folder out_img {plot_message}"
+        # --- Folium Interactive Map Generation ---
+        map_message = ""
+        if "LATITUDE" in df_reset.columns and "LONGITUDE" in df_reset.columns and not df_reset.empty:
+            try:
+                # Create a folium map centered on the mean coordinates of the data
+                map_center_lat = df_reset["LATITUDE"].mean()
+                map_center_lon = df_reset["LONGITUDE"].mean()
+                
+                m = folium.Map(location=[map_center_lat, map_center_lon], zoom_start=4)
+
+                # Add a marker for the center
+                folium.Marker(
+                    [map_center_lat, map_center_lon], 
+                    popup=f"Approx. center of {len(df_reset)} data points"
+                ).add_to(m)
+
+                # Save map to an HTML file
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                map_filename = f"interactive_map_{timestamp}.html"
+                map_path = os.path.join("out_img", map_filename)
+                m.save(map_path)
+                map_message = f" Interactive map saved to {map_path}."
+            except Exception as e:
+                map_message = f" Could not generate interactive map: {e}"
+        # --- End Folium ---
+
+        return f"✅ Plots generated in folder out_img.{plot_message}{map_message}"
     
     except ValueError as ve:
         return f"Input parsing error: {ve}"
