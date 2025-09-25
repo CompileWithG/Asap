@@ -98,7 +98,7 @@ def fetch_argo_data_by_region_plot(tool_input):
     {"platform_number": "2903334"} - Specific float
     {"temp_min": 20, "temp_max": 30} - Temperature range
     {"plot":True} or {"plot":False} - Whether to generate a plot if user asked or if possible for the given query then suggested
-    {"plot_opt": "scatter"} or {"plot_opt": "line"} - Plotting options for best visualization
+    {"plot_opt": ["scatter","scatter_3d","scatter_polar","scatter_ternary","line","line_3d","line_polar","area","bar","histogram","violin","box","strip","pie","sunburst","treemap","icicle","funnel","funnel_area","density_contour","density_heatmap","scatter_geo","choropleth","choropleth_mapbox","scatter_mapbox","density_mapbox","parallel_coordinates","parallel_categories","imshow"]} - Plotting options for best visualization 
     {"x": "PRES", "y": "TEMP"} - Plotting parameters if plot is True
 
     Returns a image path.
@@ -265,19 +265,25 @@ def fetch_argo_data_by_region_plot(tool_input):
             param_stats.append(f"📊 Pressure: {pres_range}")
         
         if parsed["plot"]==True:
-            if parsed["plot_opt"] == "scatter":
-                fig = px.scatter(data_frame=df_reset, x=parsed["x"], y=parsed["y"],title=f"Agro Data: {parsed['x']} vs. {parsed['y']}")
-            elif parsed["plot_opt"] == "line":
-                fig = px.line(data_frame=df_reset, x=parsed["x"], y=parsed["y"],title=f"Agro Data: {parsed['x']} vs. {parsed['y']}")
-            else:
-                return "❌ Invalid kind. Choose 'scatter' or 'line'."
-
+            plot_item=list(parsed["plot"])
+            plot_message=""
+            for plot in plot_items:
+                if parsed["plot_opt"] == "scatter":
+                    c+=1
+                    fig = px.scatter(data_frame=df_reset, x=parsed["x"], y=parsed["y"],title=f"Agro Data: {parsed['x']} vs. {parsed['y']}")
+                elif parsed["plot_opt"] == "line":
+                    c+=1
+                    fig = px.line(data_frame=df_reset, x=parsed["x"], y=parsed["y"],title=f"Agro Data: {parsed['x']} vs. {parsed['y']}")
+                else:
+                    plot_message+=f"unable to find the {plot} option."                
+                
             os.makedirs("out_img", exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"plot_{parsed['plot_opt']}_{parsed['x']}_{parsed['y']}_{timestamp}.png"
-            image_path = os.path.join("out_img", filename)
+            os.create
+            image_path = os.path.join("out_img",filename)
             fig.write_image(image_path)
-
+            plot_message+=f""
             return f"✅ Plot generated and saved to {image_path}"
     except ValueError as ve:
         return f"Input parsing error: {ve}"
