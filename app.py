@@ -7,7 +7,7 @@ import re
 import traceback
 from dotenv import load_dotenv
 import sys
-
+import shutil 
 from datetime import datetime 
 from argopy import ArgoIndex
 from argopy.plot import scatter_map
@@ -91,6 +91,7 @@ def fetch_argo_data_by_region_plot(tool_input):
     - Any ARGO parameters as filters: CYCLE_NUMBER, DATA_MODE, PLATFORM_NUMBER, etc.
     - Optional depth and time constraints
     - Parameter-based searches (TEMP, PSAL, PRES, etc.)
+    - This are the overall params that we have argo_params=["CYCLE_NUMBER", "DATA_MODE", "DIRECTION", "PLATFORM_NUMBER","POSITION_QC", "PRES", "PRES_ERROR", "PRES_QC","PSAL", "PSAL_ERROR", "PSAL_QC","TEMP", "TEMP_ERROR", "TEMP_QC","TIME_QC", "LATITUDE", "LONGITUDE", "TIME"]
     
     Examples:
     {"lat": 15.5, "lon": 88.2} - Single point
@@ -98,18 +99,38 @@ def fetch_argo_data_by_region_plot(tool_input):
     {"platform_number": "2903334"} - Specific float
     {"temp_min": 20, "temp_max": 30} - Temperature range
     {"plot":True} or {"plot":False} - Whether to generate a plot if user asked or if possible for the given query then suggested
-    {"plot_opt": ["scatter","scatter_3d","scatter_polar","scatter_ternary","line","line_3d","line_polar","area","bar","histogram","violin","box","strip","pie","sunburst","treemap","icicle","funnel","funnel_area","density_contour","density_heatmap","scatter_geo","choropleth","choropleth_mapbox","scatter_mapbox","density_mapbox","parallel_coordinates","parallel_categories","imshow"]} - Plotting options for best visualization 
+    this are the possible plots available-["scatter","scatter_3d","scatter_polar","scatter_ternary","line","line_3d","line_polar","area","bar","histogram","violin","box","strip","pie","sunburst","treemap","icicle","funnel","funnel_area","density_contour","density_heatmap","scatter_geo","choropleth","choropleth_mapbox","scatter_mapbox","density_mapbox","parallel_coordinates","parallel_categories","imshow"]
+    The plot option should be in this format :
+    while chossing the params like x,y take this points in mind :• Use only these numeric parameters for x–y axes:
+    ["PRES","PRES_ERROR","PSAL","PSAL_ERROR","TEMP","TEMP_ERROR","LATITUDE","LONGITUDE","CYCLE_NUMBER","PLATFORM_NUMBER"]
 
-    {"x": "PRES", "y": "TEMP"} - Plotting parameters if plot is True
+    • TIME can be x but not y.
+
+    • DATA_MODE, DIRECTION, POSITION_QC, *_QC fields are categorical and
+    may be used only on the x-axis of bar/histogram/box/violin/strip plots.
+
+    • Never pair LATITUDE vs LONGITUDE unless the plot type is one of:
+    ["scatter_geo","choropleth","choropleth_mapbox","scatter_mapbox"].
+
+    • Each plot must respect these rules or it is invalid.
+
+    {"plot_print": [          # REQUIRED if plot=true
+        {
+          "type": "<plotly_type>",      # can have any one most suitable of the plot available in the above list
+          "x": "<column_name>",         # which agro param based on the query 
+          "y": "<column_name>",         # which agro param based on the query
+        },
+        ...
+    ]}
+
     whenever plot is True plot_opt must be provided and x and y must be provided
     In plot_opt the minimum number of plots is 3 regardless of the user prompt,for the data fetched the best three plots will be generated.
     Make sure to provide valid parameters for x and y that exist in the fetched data.
-    Make sure to include only those plot options int plot_opt which are neccesary for the data fetched and are valid for the data fetched. We dont want to maximize the number of plots but we want to provide the best possible plots for the data fetched.
-    If two plot options visualize the data in similar ways then include only one of them.
+    Make sure to include only those plot options int plot_print which are neccesary for the data fetched and are valid for the data fetched. We dont want to maximize the number of plots but we want to provide the best possible plots for the data fetched.
     We need to make sure to optimize the number of plots and the quality of plots.Such that the user is not overwhelmed with too many plots and the plots provided are of high quality and provide good insights about the data fetched.
     If there is a timeout error while fetching the data,then first prioritize decreasing the date range to fetch the data to a smaller range and then if the error still persists then prioritize decreasing the bounding box to a smaller box.
-    Returns a image path.
-    """
+    Returns a image path.
+    """
     try:
         parsed = parse_action_input(tool_input)
         print(f"Parsed input: {parsed}")
@@ -273,81 +294,88 @@ def fetch_argo_data_by_region_plot(tool_input):
             pres_range = f"{df_reset['PRES'].min():.1f} to {df_reset['PRES'].max():.1f} dbar"
             param_stats.append(f"📊 Pressure: {pres_range}")
         
+        if os.path.exists("out_img"):
+                shutil.rmtree("out_img")
+
+        os.makedirs("out_img", exist_ok=True)
+
         if parsed["plot"]==True:
-            plot_item=list(parsed["plot_opt"])
-            print(plot_item)
+            plot_item = parsed.get("plot_print")
             plot_message=""  
-            os.makedirs("out_img", exist_ok=True)
             fig=None
-            for plot in plot_item:
+            df_reset=df_reset[:50]
+            for spec in plot_item:
+                plot = spec.get("type")
+                x  = spec.get("x")
+                y  = spec.get("y")
                 if plot == "scatter":
-                    fig = px.scatter(data_frame=df_reset, x=parsed["x"], y=parsed["y"], title=f"ARGO Data: {parsed['x']} vs. {parsed['y']}")
+                    fig = px.scatter(data_frame=df_reset, x=x, y=y, title=f"ARGO Data: {x} vs. {y}")
                 elif plot == "scatter_3d":
                     z = parsed.get("z", "PRES")
-                    fig = px.scatter_3d(data_frame=df_reset, x=parsed["x"], y=parsed["y"], z=z, title=f"ARGO 3D: {parsed['x']} vs. {parsed['y']} vs. {z}")
+                    fig = px.scatter_3d(data_frame=df_reset, x=x, y=y, z=z, title=f"ARGO 3D: {x} vs. {y} vs. {z}")
                 elif plot == "scatter_polar":
-                    fig = px.scatter_polar(data_frame=df_reset, r=parsed["x"], theta=parsed["y"], title=f"ARGO Polar: {parsed['x']} vs. {parsed['y']}")
+                    fig = px.scatter_polar(data_frame=df_reset, r=x, theta=y, title=f"ARGO Polar: {x} vs. {y}")
                 elif plot == "scatter_ternary":
-                    a = parsed.get("a", parsed["x"])
-                    b = parsed.get("b", parsed["y"])
+                    a = parsed.get("a", x)
+                    b = parsed.get("b", y)
                     c = parsed.get("c", "PRES")
                     fig = px.scatter_ternary(data_frame=df_reset, a=a, b=b, c=c, title=f"ARGO Ternary: {a}-{b}-{c}")
                 elif plot == "line":
-                    fig = px.line(data_frame=df_reset, x=parsed["x"], y=parsed["y"], title=f"ARGO Data: {parsed['x']} vs. {parsed['y']}")
+                    fig = px.line(data_frame=df_reset, x=x, y=y, title=f"ARGO Data: {x} vs. {y}")
                 elif plot == "line_3d":
                     z = parsed.get("z", "PRES")
-                    fig = px.line_3d(data_frame=df_reset, x=parsed["x"], y=parsed["y"], z=z, title=f"ARGO 3D Line: {parsed['x']} vs. {parsed['y']} vs. {z}")
+                    fig = px.line_3d(data_frame=df_reset, x=x, y=y, z=z, title=f"ARGO 3D Line: {x} vs. {y} vs. {z}")
                 elif plot == "line_polar":
-                    fig = px.line_polar(data_frame=df_reset, r=parsed["x"], theta=parsed["y"], title=f"ARGO Polar Line: {parsed['x']} vs. {parsed['y']}")
+                    fig = px.line_polar(data_frame=df_reset, r=x, theta=y, title=f"ARGO Polar Line: {x} vs. {y}")
                 elif plot == "area":
-                    fig = px.area(data_frame=df_reset, x=parsed["x"], y=parsed["y"], title=f"ARGO Area: {parsed['x']} vs. {parsed['y']}")
+                    fig = px.area(data_frame=df_reset, x=x, y=y, title=f"ARGO Area: {x} vs. {y}")
                 elif plot == "bar":
-                    fig = px.bar(data_frame=df_reset, x=parsed["x"], y=parsed["y"], title=f"ARGO Bar: {parsed['x']} vs. {parsed['y']}")
+                    fig = px.bar(data_frame=df_reset, x=x, y=y, title=f"ARGO Bar: {x} vs. {y}")
                 elif plot == "histogram":
-                    fig = px.histogram(data_frame=df_reset, x=parsed["x"], title=f"ARGO Histogram: {parsed['x']}")
+                    fig = px.histogram(data_frame=df_reset, x=x, title=f"ARGO Histogram: {x}")
                 elif plot == "violin":
-                    fig = px.violin(data_frame=df_reset, y=parsed["y"], title=f"ARGO Violin: {parsed['y']}")
+                    fig = px.violin(data_frame=df_reset, y=y, title=f"ARGO Violin: {y}")
                 elif plot == "box":
-                    fig = px.box(data_frame=df_reset, y=parsed["y"], title=f"ARGO Box Plot: {parsed['y']}")
+                    fig = px.box(data_frame=df_reset, y=y, title=f"ARGO Box Plot: {y}")
                 elif plot == "strip":
-                    fig = px.strip(data_frame=df_reset, y=parsed["y"], title=f"ARGO Strip Plot: {parsed['y']}")
+                    fig = px.strip(data_frame=df_reset, y=y, title=f"ARGO Strip Plot: {y}")
                 elif plot == "pie":
-                    fig = px.pie(data_frame=df_reset, names=parsed["x"], values=parsed["y"], title=f"ARGO Pie: {parsed['x']}")
+                    fig = px.pie(data_frame=df_reset, names=x, values=y, title=f"ARGO Pie: {x}")
                 elif plot == "sunburst":
-                    path = parsed.get("path", [parsed["x"]])
-                    fig = px.sunburst(data_frame=df_reset, path=path, values=parsed["y"], title=f"ARGO Sunburst")
+                    path = parsed.get("path", [x])
+                    fig = px.sunburst(data_frame=df_reset, path=path, values=y, title=f"ARGO Sunburst")
                 elif plot == "treemap":
-                    path = parsed.get("path", [parsed["x"]])
-                    fig = px.treemap(data_frame=df_reset, path=path, values=parsed["y"], title=f"ARGO Treemap")
+                    path = parsed.get("path", [x])
+                    fig = px.treemap(data_frame=df_reset, path=path, values=y, title=f"ARGO Treemap")
                 elif plot == "icicle":
-                    path = parsed.get("path", [parsed["x"]])
-                    fig = px.icicle(data_frame=df_reset, path=path, values=parsed["y"], title=f"ARGO Icicle")
+                    path = parsed.get("path", [x])
+                    fig = px.icicle(data_frame=df_reset, path=path, values=y, title=f"ARGO Icicle")
                 elif plot == "funnel":
-                    fig = px.funnel(data_frame=df_reset, x=parsed["x"], y=parsed["y"], title=f"ARGO Funnel: {parsed['x']} vs. {parsed['y']}")
+                    fig = px.funnel(data_frame=df_reset, x=x, y=y, title=f"ARGO Funnel: {x} vs. {y}")
                 elif plot == "funnel_area":
-                    fig = px.funnel_area(data_frame=df_reset, names=parsed["x"], values=parsed["y"], title=f"ARGO Funnel Area")
+                    fig = px.funnel_area(data_frame=df_reset, names=x, values=y, title=f"ARGO Funnel Area")
                 elif plot == "density_contour":
-                    fig = px.density_contour(data_frame=df_reset, x=parsed["x"], y=parsed["y"], title=f"ARGO Density Contour: {parsed['x']} vs. {parsed['y']}")
+                    fig = px.density_contour(data_frame=df_reset, x=x, y=y, title=f"ARGO Density Contour: {x} vs. {y}")
                 elif plot == "density_heatmap":
-                    fig = px.density_heatmap(data_frame=df_reset, x=parsed["x"], y=parsed["y"], title=f"ARGO Density Heatmap: {parsed['x']} vs. {parsed['y']}")
+                    fig = px.density_heatmap(data_frame=df_reset, x=x, y=y, title=f"ARGO Density Heatmap: {x} vs. {y}")
                 elif plot == "scatter_geo":
                     if "LATITUDE" in df_reset.columns and "LONGITUDE" in df_reset.columns:
-                        fig = px.scatter_geo(data_frame=df_reset, lat="LATITUDE", lon="LONGITUDE", color=parsed.get("color", parsed["y"]), title=f"ARGO Geographic Scatter")
+                        fig = px.scatter_geo(data_frame=df_reset, lat="LATITUDE", lon="LONGITUDE", color=parsed.get("color", y), title=f"ARGO Geographic Scatter")
                     else:
                         plot_message += f"❌ Geographic coordinates (LATITUDE, LONGITUDE) not available for scatter_geo. "
                         continue
                 elif plot == "choropleth":
                     locations = parsed.get("locations", "PLATFORM_NUMBER")
-                    fig = px.choropleth(data_frame=df_reset, locations=locations, color=parsed["y"], title=f"ARGO Choropleth")
+                    fig = px.choropleth(data_frame=df_reset, locations=locations, color=y, title=f"ARGO Choropleth")
                 elif plot == "choropleth_mapbox":
                     if "LATITUDE" in df_reset.columns and "LONGITUDE" in df_reset.columns:
-                        fig = px.choropleth_mapbox(data_frame=df_reset, lat="LATITUDE", lon="LONGITUDE", color=parsed["y"], title=f"ARGO Choropleth Mapbox")
+                        fig = px.choropleth_mapbox(data_frame=df_reset, lat="LATITUDE", lon="LONGITUDE", color=y, title=f"ARGO Choropleth Mapbox")
                     else:
                         plot_message += f"❌ Geographic coordinates not available for choropleth_mapbox. "
                         continue
                 elif plot == "scatter_mapbox":
                     if "LATITUDE" in df_reset.columns and "LONGITUDE" in df_reset.columns:
-                        fig = px.scatter_mapbox(data_frame=df_reset, lat="LATITUDE", lon="LONGITUDE", color=parsed.get("color", parsed["y"]), title=f"ARGO Scatter Mapbox")
+                        fig = px.scatter_mapbox(data_frame=df_reset, lat="LATITUDE", lon="LONGITUDE", color=parsed.get("color", y), title=f"ARGO Scatter Mapbox")
                     else:
                         plot_message += f"❌ Geographic coordinates not available for scatter_mapbox. "
                         continue
@@ -361,24 +389,24 @@ def fetch_argo_data_by_region_plot(tool_input):
                     dimensions = parsed.get("dimensions", ["TEMP", "PSAL", "PRES"])
                     fig = px.parallel_coordinates(data_frame=df_reset, dimensions=dimensions, title=f"ARGO Parallel Coordinates")
                 elif plot == "parallel_categories":
-                    dimensions = parsed.get("dimensions", [parsed["x"], parsed["y"]])
+                    dimensions = parsed.get("dimensions", [x,y])
                     fig = px.parallel_categories(data_frame=df_reset, dimensions=dimensions, title=f"ARGO Parallel Categories")
                 elif plot == "imshow":
                     try:
-                        pivot_data = df_reset.pivot_table(values=parsed["y"], index=parsed["x"], columns=parsed.get("columns", "TIME"))
-                        fig = px.imshow(pivot_data, title=f"ARGO Heatmap: {parsed['y']}")
+                        pivot_data = df_reset.pivot_table(values=y, index=x, columns=parsed.get("columns", "TIME"))
+                        fig = px.imshow(pivot_data, title=f"ARGO Heatmap: {y}")
                     except Exception as e:
                         plot_message += f"❌ Cannot create imshow plot: {e}. Try using density_heatmap instead. "
                         continue
                 else:
-                    plot_message += f"❌ Unable to find the {parsed['plot_opt']} option. Available options: scatter, scatter_3d, scatter_polar, scatter_ternary, line, line_3d, line_polar, area, bar, histogram, violin, box, strip, pie, sunburst, treemap, icicle, funnel, funnel_area, density_contour, density_heatmap, scatter_geo, choropleth, choropleth_mapbox, scatter_mapbox, density_mapbox, parallel_coordinates, parallel_categories, imshow. "            
+                    plot_message += f"❌ Unable to find the {parsed['plot_print']} option. Available options: scatter, scatter_3d, scatter_polar, scatter_ternary, line, line_3d, line_polar, area, bar, histogram, violin, box, strip, pie, sunburst, treemap, icicle, funnel, funnel_area, density_contour, density_heatmap, scatter_geo, choropleth, choropleth_mapbox, scatter_mapbox, density_mapbox, parallel_coordinates, parallel_categories, imshow. "            
 
                 if fig:     
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"plot_{parsed['plot_opt']}_{parsed['x']}_{parsed['y']}_{timestamp}.png"
+                    filename = f"plot_{plot}_{x}_{y}_{timestamp}.png"
                     image_path = os.path.join("out_img",filename)
                     fig.write_image(image_path)
-                    plot_message += f"Plot {parsed['plot_opt']} saved to {image_path}."
+                    plot_message += f"Plot {plot} saved to {image_path}."
 
         return f"✅ Plots generated in folder out_img {plot_message}"
     
@@ -514,7 +542,7 @@ agent = create_react_agent(llm, tools, prompt)
 agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True,max_iterations=3,early_stopping_method="force",handle_parsing_errors=True,return_intermediate_steps=True)
 
 
-# --- Streamlit frontend ---
+# --- Streamlit frontend ---nb 
 
 st.title("FloatChat 🌊 - ARGO Ocean Data Assistant")
 
