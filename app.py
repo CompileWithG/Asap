@@ -252,6 +252,9 @@ def fetch_argo_data_by_region_plot(tool_input):
 
         final_count = len(df_reset)
 
+        # Save the filtered data to a CSV file in the root directory
+        df_reset.to_csv("argo_data.csv", index=False)
+
         if "TIME" in df_reset.columns:
             min_date = pd.to_datetime(df_reset["TIME"].min()).strftime("%Y-%m-%d")
             max_date = pd.to_datetime(df_reset["TIME"].max()).strftime("%Y-%m-%d")
@@ -279,6 +282,7 @@ def fetch_argo_data_by_region_plot(tool_input):
             plot_message=""  
             os.makedirs("out_img", exist_ok=True)
             fig=None
+            df_reset=df_reset[:50]
             for plot in plot_item:
                 if plot == "scatter":
                     fig = px.scatter(data_frame=df_reset, x=parsed["x"], y=parsed["y"], title=f"ARGO Data: {parsed['x']} vs. {parsed['y']}")
