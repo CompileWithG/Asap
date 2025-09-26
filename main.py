@@ -1,4 +1,5 @@
-# main.py
+# main.py - FastAPI application
+
 import asyncio
 import json
 import os
@@ -9,6 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import pandas as pd
+from fastapi.middleware.cors import CORSMiddleware
+
+
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
