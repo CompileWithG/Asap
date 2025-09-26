@@ -16,7 +16,7 @@ import seaborn as sns
 import plotly.express as px
 import folium
 import numpy as np
-
+import pathlib
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain import hub
@@ -187,7 +187,6 @@ def generate_data_analysis_summary(user_query: str) -> str:
         3. How these values compare with typical ocean conditions for this region/time.
         """
         # Initialize LLM for analysis
-        print(analysis_prompt)
         analysis_llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
         
         # Get analysis from LLM
@@ -196,6 +195,44 @@ def generate_data_analysis_summary(user_query: str) -> str:
         return f"\n\n📊 **DATA ANALYSIS SUMMARY:**\n{analysis_response.content}"
     except Exception as e:
         return f"\n\n⚠️ Could not generate data analysis summary: {str(e)}"
+
+def generate_plot_summary_from_image(image_path: str):
+    """
+    Analyzes a plot image using a multimodal LLM and saves the explanation to a text file.
+    """
+    try:
+        vision_llm = ChatGoogleGenerativeAI(model="gemini-pro-vision")
+        
+        text_prompt = """
+        You are an expert data analyst specializing in oceanography.
+        Look at the attached plot from the Argo float program.
+        Provide a brief, one-paragraph explanation of what this plot shows.
+        - What are the variables on the axes?
+        - What is the relationship, trend, or distribution shown?
+        - What is the key insight a non-expert should take away from this visualization?
+        Be precise and clear.
+        """
+
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": text_prompt},
+                {"type": "image_url", "image_url": image_path},
+            ]
+        )
+
+        response = vision_llm.invoke([message])
+        explanation_text = response.content
+
+        summary_path = pathlib.Path(image_path).with_suffix(".txt")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            f.write(explanation_text)
+
+    except Exception as e:
+        error_message = f"Could not generate summary for {os.path.basename(image_path)}: {e}"
+        summary_path = pathlib.Path(image_path).with_suffix(".txt")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            f.write(error_message)
+        print(error_message)
 
 # --- Tools ---
 @tool()
@@ -224,6 +261,8 @@ def fetch_argo_data_by_region_plot(tool_input):
     3. Validate columns exist in the fetched dataframe before plotting. If a requested column is missing, skip that plot and explain why.
     4. Do not propose redundant plots: if two plot types convey essentially the same view (e.g., "strip" vs "scatter" for the same numeric pair and grouping), include only one.
     5. When plot generation times out or a network error occurs, first reduce date range; if still failing, reduce bounding box. Return the attempted change and retry.
+    6. If there is a timeout error while fetching the data,then first prioritize decreasing the date range to fetch the data to a smaller range and then if the error still persists then prioritize decreasing the bounding box to a smaller box. if it encounters more than twice then aggressively reduce the parameters.
+
 
     COLUMN USAGE GUIDELINES
     - Numeric / continuous (suitable for x/y): PRES, PRES_ERROR, PSAL, PSAL_ERROR, TEMP, TEMP_ERROR, LATITUDE*, LONGITUDE*, CYCLE_NUMBER*, PLATFORM_NUMBER*
@@ -234,6 +273,7 @@ def fetch_argo_data_by_region_plot(tool_input):
 
     PLOT TYPE → REQUIRED COLUMNS / RECOMMENDED USAGE (examples)
     - ******Dont take a random guess on chossing the x and y becuase the plot will not make any sense so be carefull******
+    - never do a line plot using TEMP vs PSAL or TEMP vs PRES
     - scatter, line: numeric x & y (e.g., TEMP vs PSAL; TEMP vs PRES). For line representing vertical profiles: **group by CYCLE_NUMBER or PLATFORM_NUMBER and sort by PRES**; reverse y-axis so depth increases downward.
     - histogram, density_heatmap: single numeric x (histogram), numeric x & y pairs for density_heatmap.
     - box, violin: categorical x (DATA_MODE / PLATFORM_NUMBER / CYCLE_NUMBER) and numeric y (TEMP/PSAL).
@@ -540,6 +580,7 @@ def fetch_argo_data_by_region_plot(tool_input):
                     filename = f"plot_{plot}_{x}_{y}_{timestamp}.png"
                     image_path = os.path.join("out_img",filename)
                     fig.write_image(image_path)
+                    generate_plot_summary_from_image(image_path)
                     plot_message += f"Plot {plot} saved to {image_path}."
 
         # --- Folium Interactive Map Generation ---
@@ -620,6 +661,7 @@ def generate_bgc_parameter_map(tool_input):
         filename=f"bgc_map_{parameter}_{timestamp}.png"
         image_path = os.path.join("out_img", filename)
         fig.write_image(image_path)
+        generate_plot_summary_from_image(image_path)
 
         return f"✅ SUCCESS: Map generated and saved to {image_path}. Found {len(df)} profiles with {parameter} data."
     except ValueError as ve:
@@ -637,61 +679,100 @@ llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
 tools = [fetch_argo_data_by_region_plot, generate_bgc_parameter_map]
 
 # Improve the prompt to ask the agent to emit JSON for action inputs
-react_prompt_template = '''Answer the following questions as best you can. Your final answer should be a comprehensive summary of your findings, incorporating the details from the observations you have made. You have access to the following tools:
+react_prompt_template = '''Answer the following questions as best you can. Your final answer should be a comprehensive summary of your findings, incorporating details from observations you made. You have access to the following tools:
 
 {tools}
 
-When you call a tool, the "Action Input" MUST be a valid JSON object corresponding to the tool's arguments.
+When you call a tool, the "Action Input" MUST be a valid JSON object matching the tool's arguments.
 
-For `fetch_argo_data_by_region`, the JSON can contain ANY of these optional fields:
-Geographic Options:
-  - Single point: {{"lat": <number>, "lon": <number>, "buffer": <degrees>}}
-  - Bounding box: {{"lat_min": <number>, "lat_max": <number>, "lon_min": <number>, "lon_max": <number>}}
-  - Partial bounds: Any subset of lat_min, lat_max, lon_min, lon_max (others use global defaults)
-  
-Parameter Filters (all optional):
-  - Depth/Pressure: "pres_min", "pres_max" (default: 0-2000 dbar)
-  - Temperature: "temp_min", "temp_max" (in °C)
-  - Salinity: "psal_min", "psal_max" (in PSU)
-  - Time: "date_start", "date_end" (format: "YYYY-MM-DD", default: 2020-2024)
-  - Platform: "platform_number" (specific ARGO float ID)
-  - Cycle: "cycle_number" (specific measurement cycle)
-  - Data Quality: "data_mode" ("R"=real-time, "A"=adjusted, "D"=delayed-mode)
+TOOL USAGE SUMMARY (quick)
+1) fetch_argo_data_by_region
+   - Accepts geographic, parameter, time, depth, platform, cycle and quality filters.
+   - Geographic: single point {{ "lat": <num>, "lon": <num>, "buffer": <deg> }} OR bounding box {{ "lat_min": <num>, "lat_max": <num>, "lon_min": <num>, "lon_max": <num> }}.
+   - Parameter filters: "pres_min", "pres_max", "temp_min", "temp_max", "psal_min", "psal_max".
+   - Time: "date_start","date_end" formatted "YYYY-MM-DD".
+   - Platform / cycle: "platform_number", "cycle_number".
+   - Data mode: "data_mode" ("R","A","D").
+   - If the query is too large and fetch times out, PRIORITY for retry: first reduce date range, then reduce bounding box. Report any automatic reductions you attempt.
 
-Examples:
-  - {{"lat": 15, "lon": 88}} - Single point near Bay of Bengal
-  - {{"lat_min": 5, "lat_max": 25, "lon_min": 80, "lon_max": 100}} - Regional box
-  - {{"temp_min": 28, "psal_max": 35}} - Global search with parameter filters
-  - {{"platform_number": "2903334"}} - Specific ARGO float data
-  - {{"lat": 10, "lon": 75, "temp_min": 25, "pres_max": 1000}} - Combined filters
+2) generate_bgc_parameter_map
+   - Requires: {{ "parameter": "<BGC_PARAM>" }}.
+   - Available BGC parameters: "DOXY","BBP700","BBP470","CHLA","NITRATE","PH_IN_SITU_TOTAL","DOWNWELLING_PAR".
 
-For `generate_bgc_parameter_map`, the JSON must contain:
-  {{"parameter": "BGC_PARAMETER_NAME"}}
-  
-Available BGC parameters: "DOXY" (oxygen), "BBP700" (backscattering), "BBP470", "CHLA" (chlorophyll), "NITRATE", "PH_IN_SITU_TOTAL", "DOWNWELLING_PAR"
+DATA SCHEMA (available columns)
+["CYCLE_NUMBER","DATA_MODE","DIRECTION","PLATFORM_NUMBER","POSITION_QC",
+ "PRES","PRES_ERROR","PRES_QC","PSAL","PSAL_ERROR","PSAL_QC",
+ "TEMP","TEMP_ERROR","TEMP_QC","TIME_QC","LATITUDE","LONGITUDE","TIME"]
 
-IMPORTANT STOPPING CONDITIONS:
-- If you receive a "✅ SUCCESS" observation from any tool, immediately proceed to "Final Answer"
-- If a map/visualization is generated successfully, provide the image path in your Final Answer, do NOT repeat the same action
-- If you get data from ARGO floats, analyze it and provide your Final Answer
-- Do NOT call the same tool multiple times with the same parameters and get in a loop
-- Use the most appropriate parameters based on the user's question
+Type hints:
+- Numeric / continuous: PRES, PRES_ERROR, PSAL, PSAL_ERROR, TEMP, TEMP_ERROR, LATITUDE, LONGITUDE (and TIME if converted to timestamp)
+- Categorical / discrete: DATA_MODE, DIRECTION, POSITION_QC, *_QC, PLATFORM_NUMBER, CYCLE_NUMBER (can be used for grouping/colouring but not always continuous)
+- TIME: allowed as x for time-series only (convert to datetime), not as y.
 
-Use the following format:
+Requirements for plotting:
+1. If "plot": true → "plot_print" is REQUIRED and must include at least **3 valid plot objects** unless the data cannot be meaningfully visualized (explain why).
+2. Each plot object must specify "type" (a Plotly Express type) and the columns it requires ("x" and/or "y") appropriate for that plot type.
+3. Validate columns exist in the fetched dataframe before plotting. If a requested column is missing, skip that plot and add an explanation to the observation.
+4. Do **not** propose redundant plots. If two plot types convey essentially the same insight for the same columns (e.g., "strip" vs "scatter" with the same encoding), include only one.
+5. For geo plots ("scatter_geo","scatter_mapbox","choropleth_mapbox","density_mapbox"), **both** LATITUDE and LONGITUDE must be present and appropriate.
+6. For line/profile plots where PRES is used as the vertical axis:
+   - Treat this as a vertical profile only if you can group by CYCLE_NUMBER or PLATFORM_NUMBER.
+   - Sort each group by PRES and reverse the y-axis (depth increases downward).
+   - If grouping or PRES sort is impossible, convert to a scatter plot instead of a global line.
+7. TIME may be used as x for time-series plots; convert to datetime and ensure the times are contiguous/ordered for lines.
+8. Categorical fields (DATA_MODE, DIRECTION, *_QC) should be used for color, facet, or x in box/violin/bar plots — not as y in continuous line charts.
 
-Question: the input question you must answer
-Thought: you should always think about what to do
-Action: the action to take, should be one of [{tool_names}]
-Action Input: the input to the action (MUST be valid JSON as described)
-Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can repeat N times)
+Plot types you may pick from (examples): "scatter","line","histogram","box","violin","density_heatmap","scatter_geo","scatter_mapbox","parallel_coordinates","imshow", etc. Choose plot types that match the data types available.
+
+HOW TO CHOOSE THE BEST 3 (Agent heuristics — follow these in order)
+
+When the user requests plots (or when the agent suggests them), choose at least three plots that maximize insight and minimize redundancy:
+
+1. Mandatory: include a **distribution view** for a primary numeric variable (TEMP or PSAL) — e.g., histogram or box/violin.
+2. If LAT/LON present: include **one geospatial view** (scatter_geo or density_mapbox) showing coverage.
+3. If PRES + CYCLE_NUMBER (or PLATFORM_NUMBER) present: include **one profile view** (TEMP vs PRES grouped by cycle or platform). Use line per group (sorted by PRES) — otherwise use scatter.
+4. Include a **relational view** (e.g., TEMP vs PSAL scatter or density) to show physical relationships (T–S diagram).
+5. If more than 3 meaningful, you may include additional non-redundant plots the user requested.
+6. If a user provided explicit "plot_print", validate & honor it; if any plots are invalid or missing required fields, suggest corrections and generate the valid subset (still aiming for 3 if feasible).
+
+
+VALIDATION BEFORE CALLING PLOT TOOL (what you must check)
+
+- Column existence in df.
+- Column types: numeric required for continuous axes.
+- For geo plots: require LATITUDE & LONGITUDE.
+- For line/profile: group & sort by PRES present; else fallback to scatter.
+- Convert TIME to datetime when used as x.
+- If plot objects < 3 after validation, explain why and either:
+  - generate the valid ones and note why you couldn't reach 3, or
+  - request clarification from the user.
+
+IMPORTANT STOPPING CONDITIONS
+
+- If you receive a "✅ SUCCESS" observation from any tool, immediately proceed to "Final Answer".
+- If a map/visualization is generated successfully, include the image path in "Final Answer" and DO NOT repeat the same action.
+- Do NOT call the same tool multiple times with the same parameters in a loop.
+- Use the most appropriate parameters based on the user's question and these heuristics.
+
+CALL / RESPONSE FORMAT (strict)
+
+Follow this exact format for your reasoning and calls:
+
+Question: {input}
+Thought: (brief reasoning about what you will do next)
+Action: one of [{tool_names}]
+Action Input: (valid JSON matching the tool's schema)
+Observation: (tool output)
+... (repeat Thought/Action/Action Input/Observation as needed)
 Thought: I now know the final answer
-Final Answer: the final answer to the original input question. Be descriptive and include details from your observations. If an image was generated, mention the file path.
+Final Answer: (comprehensive, include observations, list of generated image paths, and any adjustments made)
 
 Begin!
 
 Question: {input}
 Thought:{agent_scratchpad}'''
+
+
 
 prompt = PromptTemplate.from_template(react_prompt_template)
 
@@ -699,7 +780,7 @@ prompt = PromptTemplate.from_template(react_prompt_template)
 agent = create_react_agent(llm, tools, prompt)
 
 # Create the Agent Executor which will run the agent
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True,max_iterations=3,early_stopping_method="force",handle_parsing_errors=True,return_intermediate_steps=True)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True,max_iterations=10,early_stopping_method="force",handle_parsing_errors=True,return_intermediate_steps=True)
 
 
 # --- Streamlit frontend ---nb 
@@ -714,15 +795,17 @@ if "messages" not in st.session_state:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        if "image" in message:
+        if "images" in message:  # Changed from "image" to "images"
             try:
-                if os.path.exists(message["image"]):
-                    st.image(message["image"])
-                else:
-                    st.warning(f"Image file not found: {message['image']}")
+                for img_path in message["images"]:
+                    if os.path.exists(img_path):
+                        st.image(img_path, caption=f"Generated: {os.path.basename(img_path)}", use_container_width=True)
+                    else:
+                        st.warning(f"Image file not found: {img_path}")
             except Exception as e:
-                st.error(f"Error displaying image: {e}")
+                st.error(f"Error displaying images: {e}")
 
+# Handle user input
 # Handle user input
 if prompt_text := st.chat_input("Ask about ARGO float data..."):
     # Add user message to history and display it
@@ -742,68 +825,71 @@ if prompt_text := st.chat_input("Ask about ARGO float data..."):
             # Append analysis summary to response text
             if analysis_summary:
                 response_text += analysis_summary
-            
-            # Create a comprehensive string to search for file paths from all agent steps
-            text_to_search = response_text
-            if 'intermediate_steps' in response:
-                for action, observation in response['intermediate_steps']:
-                    text_to_search += str(observation)
 
             st.markdown(response_text)
             
-            # Better image path extraction - look for specific patterns
-            image_path = None
+            # 🚀 SIMPLIFIED: Just scan the out_img directory for all files
+            valid_images = []
+            html_files = []
             
-            # Try multiple patterns to find the image path
-            image_patterns = [
-                r"saved to ([^\s,;]+\.png)", 
-                r"saved to ([^\s,;]+\.jpg)",  
-                r"saved to ([^\s,;]+\.html)", 
-                r"Map generated and saved to ([^\s,;.]+\.png)",
-                r"([a-zA-Z_][a-zA-Z0-9_]*\.png)",  
-                r"([a-zA-Z_][a-zA-Z0-9_]*\.jpg)",  
-            ]
-
+            if os.path.exists("out_img"):
+                for filename in os.listdir("out_img"):
+                    file_path = os.path.join("out_img", filename)
+                    
+                    if filename.endswith(('.png', '.jpg', '.jpeg')):
+                        valid_images.append(file_path)
+                    elif filename.endswith('.html'):
+                        html_files.append(file_path)
             
-            for pattern in image_patterns:
-                match = re.search(pattern, text_to_search)
-                if match:
-                    image_path = match.group(1).strip()
-                    break
-            
-            if image_path:
-                # Simple path construction - images are always in out_img folder
-                if not image_path.startswith("out_img"):
-                    # If extracted path doesn't include out_img, add it
-                    full_path = os.path.join("out_img", os.path.basename(image_path))
-                else:
-                    # If it already includes out_img, use as is
-                    full_path = image_path
+            # Display all valid images
+            if valid_images:
+                st.write(f"🖼️ **Generated {len(valid_images)} visualization(s):**")
                 
-                if os.path.exists(full_path):
-                    try:
-                        if full_path.endswith('.png') or full_path.endswith('.jpg'):
-                            st.image(full_path, caption="Generated Map", use_container_width=True)
-                            st.session_state.messages.append({
-                                "role": "assistant", 
-                                "content": response_text, 
-                                "image": full_path
-                            })
-                        elif full_path.endswith('.html'):
-                            with open(full_path, 'r') as f:
-                                html_content = f.read()
-                            st.components.v1.html(html_content, height=600)
-                            st.success("🎉 Interactive map displayed successfully!")
-                            st.session_state.messages.append({
-                                "role": "assistant", 
-                                "content": response_text + f"\n\nInteractive map: {full_path}"
-                            })
-                    except Exception as e:
-                        st.error(f"❌ Error displaying image: {e}")
-                        st.session_state.messages.append({"role": "assistant", "content": response_text})
+                # Display images in columns for better layout
+                if len(valid_images) == 1:
+                    st.image(valid_images[0], caption=f"Generated: {os.path.basename(valid_images[0])}", use_container_width=True)
+                elif len(valid_images) <= 3:
+                    cols = st.columns(len(valid_images))
+                    for i, img_path in enumerate(valid_images):
+                        with cols[i]:
+                            st.image(img_path, caption=f"{os.path.basename(img_path)}", use_container_width=True)
                 else:
-                    st.write(f"❌ File not found: `{full_path}`")
-                    st.session_state.messages.append({"role": "assistant", "content": response_text})
-            else:
-                st.write("ℹ️ No image path detected in response")
+                    # For more than 3 images, display in rows of 3
+                    for i in range(0, len(valid_images), 3):
+                        cols = st.columns(3)
+                        for j, img_path in enumerate(valid_images[i:i+3]):
+                            with cols[j]:
+                                st.image(img_path, caption=f"{os.path.basename(img_path)}", use_container_width=True)
+                
+                # Save to session state with multiple images
+                st.session_state.messages.append({
+                    "role": "assistant", 
+                    "content": response_text, 
+                    "images": valid_images
+                })
+            
+            # Display HTML files (interactive maps)
+            if html_files:
+                for html_path in html_files:
+                    try:
+                        with open(html_path, 'r') as f:
+                            html_content = f.read()
+                        st.components.v1.html(html_content, height=600)
+                    except Exception as e:
+                        st.error(f"❌ Error displaying HTML file {html_path}: {e}")
+                
+                # Add HTML files to session state if we also have images
+                if valid_images:
+                    # Update the last message to include HTML files
+                    st.session_state.messages[-1]["content"] += f"\n\nInteractive maps: {', '.join([os.path.basename(f) for f in html_files])}"
+                else:
+                    # Create new message entry for HTML only
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": response_text + f"\n\nInteractive maps: {', '.join([os.path.basename(f) for f in html_files])}"
+                    })
+            
+            # If no images found at all
+            if not valid_images and not html_files:
+                st.write("ℹ️ No visualizations generated")
                 st.session_state.messages.append({"role": "assistant", "content": response_text})
