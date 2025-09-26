@@ -1,1 +1,0 @@
-Could not generate summary for plot_scatter_geo_LONGITUDE_LATITUDE_20250926_102336.png: name 'HumanMessage' is not defined

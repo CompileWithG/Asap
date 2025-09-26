@@ -22,6 +22,9 @@ from langchain.agents import AgentExecutor, create_react_agent
 from langchain import hub
 from langchain.tools import tool
 from langchain.prompts import PromptTemplate
+import requests
+import base64
+
 
 from argopy import DataFetcher
 
@@ -172,7 +175,8 @@ def generate_data_analysis_summary(user_query: str) -> str:
         # ---------- 4. Compose final prompt ----------
         analysis_prompt = f"""
         Based on the following user query and ARGO float data, provide a concise but
-        scientifically sound oceanographic analysis.
+        scientifically sound oceanographic analysis.While also keeping the scientifically sound ,generate an another version of the analysis which is easy to understand for a non expert user.
+        This should be appended to the scientifically sound and detailed explanation.
 
         USER QUERY:
         {user_query}
@@ -196,12 +200,40 @@ def generate_data_analysis_summary(user_query: str) -> str:
     except Exception as e:
         return f"\n\n⚠️ Could not generate data analysis summary: {str(e)}"
 
-def generate_plot_summary_from_image(image_path: str):
-    """
-    Analyzes a plot image using a multimodal LLM and saves the explanation to a text file.
-    """
+def upload_image_to_imgbb(image_path, api_key):
+    """Upload image to ImgBB and return public URL"""
     try:
-        vision_llm = ChatGoogleGenerativeAI(model="gemini-pro-vision")
+        with open(image_path, "rb") as file:
+            # Convert to base64
+            image_data = base64.b64encode(file.read()).decode('utf-8')
+        
+        url = "https://api.imgbb.com/1/upload"
+        payload = {
+            'key': api_key,  # Get free API key from imgbb.com
+            'image': image_data,
+        }
+        
+        response = requests.post(url, data=payload)
+        result = response.json()
+        
+        if result['success']:
+            return result['data']['url']
+        else:
+            return None
+    except Exception as e:
+        print(f"Error uploading to ImgBB: {e}")
+        return None
+
+def generate_plot_summary_from_image(image_path: str):
+    try:
+        # Upload to ImgBB first
+        imgbb_api_key = os.getenv("IMGBB_API")  # Add to your .env file
+        public_url = upload_image_to_imgbb(image_path, imgbb_api_key)
+        
+        if not public_url:
+            return "Could not upload image for analysis"
+        
+        vision_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
         
         text_prompt = """
         You are an expert data analyst specializing in oceanography.
@@ -213,13 +245,14 @@ def generate_plot_summary_from_image(image_path: str):
         Be precise and clear.
         """
 
+        from langchain_core.messages import HumanMessage
+        
         message = HumanMessage(
             content=[
                 {"type": "text", "text": text_prompt},
-                {"type": "image_url", "image_url": image_path},
+                {"type": "image_url", "image_url": {"url": public_url}},
             ]
         )
-
         response = vision_llm.invoke([message])
         explanation_text = response.content
 
@@ -233,7 +266,7 @@ def generate_plot_summary_from_image(image_path: str):
         with open(summary_path, "w", encoding="utf-8") as f:
             f.write(error_message)
         print(error_message)
-
+        return error_message
 # --- Tools ---
 @tool()
 def fetch_argo_data_by_region_plot(tool_input):
@@ -469,10 +502,7 @@ def fetch_argo_data_by_region_plot(tool_input):
             param_stats.append(f"📊 Pressure: {pres_range}")
         
         df_reset.to_csv("argo_data.csv",index=False)
-        if os.path.exists("out_img"):
-                shutil.rmtree("out_img")
-
-        os.makedirs("out_img", exist_ok=True)
+        
 
         if parsed["plot"]==True:
             plot_item = parsed.get("plot_print")
@@ -792,45 +822,68 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # Display past chat messages
+# Display past chat messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        if "images" in message:  # Changed from "image" to "images"
-            try:
-                for img_path in message["images"]:
-                    if os.path.exists(img_path):
-                        st.image(img_path, caption=f"Generated: {os.path.basename(img_path)}", use_container_width=True)
-                    else:
-                        st.warning(f"Image file not found: {img_path}")
-            except Exception as e:
-                st.error(f"Error displaying images: {e}")
+        
+        # Display images if present
+        if "images" in message:
+            for img_path in message["images"]:
+                if os.path.exists(img_path):
+                    st.image(img_path, caption=f"Generated: {os.path.basename(img_path)}", use_container_width=True)
+        
+        # Display HTML files if present
+        if "html_files" in message:
+            for html_path in message["html_files"]:
+                if os.path.exists(html_path):
+                    try:
+                        with open(html_path, 'r') as f:
+                            html_content = f.read()
+                        st.components.v1.html(html_content, height=400)  # Smaller in history
+                    except Exception as e:
+                        st.warning(f"Could not redisplay map: {os.path.basename(html_path)}")
+        
+        # Display text files if present
+        if "txt_files" in message:
+            for txt_path in message["txt_files"]:
+                if os.path.exists(txt_path):
+                    try:
+                        with open(txt_path, 'r') as f:
+                            txt_content = f.read()
+                        with st.expander(f"📋 {os.path.basename(txt_path)}", expanded=False):
+                            st.text(txt_content)
+                    except Exception as e:
+                        st.warning(f"Could not redisplay text: {os.path.basename(txt_path)}")
 
 # Handle user input
-# Handle user input
 if prompt_text := st.chat_input("Ask about ARGO float data..."):
-    # Add user message to history and display it
+    # Clear previous output and add user message
+    if os.path.exists("out_img"):
+        shutil.rmtree("out_img")
+    os.makedirs("out_img", exist_ok=True)
+
     st.session_state.messages.append({"role": "user", "content": prompt_text})
     with st.chat_message("user"):
         st.markdown(prompt_text)
 
-    # Get assistant response by invoking the agent
+    # Get assistant response
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             response = agent_executor.invoke({"input": prompt_text})
             response_text = response.get("output", "I encountered an error.")
             
-            # Display response text first
+            # Add analysis summary
             analysis_summary = generate_data_analysis_summary(prompt_text)
-            
-            # Append analysis summary to response text
             if analysis_summary:
                 response_text += analysis_summary
 
             st.markdown(response_text)
             
-            # 🚀 SIMPLIFIED: Just scan the out_img directory for all files
+            # 🚀 Collect ALL files at once
             valid_images = []
             html_files = []
+            txt_files = []
             
             if os.path.exists("out_img"):
                 for filename in os.listdir("out_img"):
@@ -840,12 +893,16 @@ if prompt_text := st.chat_input("Ask about ARGO float data..."):
                         valid_images.append(file_path)
                     elif filename.endswith('.html'):
                         html_files.append(file_path)
+                    elif filename.endswith('.txt'):
+                        txt_files.append(file_path)
+
+            # Display all content types
+            displayed_content = []
             
-            # Display all valid images
+            # Display images
             if valid_images:
                 st.write(f"🖼️ **Generated {len(valid_images)} visualization(s):**")
                 
-                # Display images in columns for better layout
                 if len(valid_images) == 1:
                     st.image(valid_images[0], caption=f"Generated: {os.path.basename(valid_images[0])}", use_container_width=True)
                 elif len(valid_images) <= 3:
@@ -854,42 +911,67 @@ if prompt_text := st.chat_input("Ask about ARGO float data..."):
                         with cols[i]:
                             st.image(img_path, caption=f"{os.path.basename(img_path)}", use_container_width=True)
                 else:
-                    # For more than 3 images, display in rows of 3
                     for i in range(0, len(valid_images), 3):
                         cols = st.columns(3)
                         for j, img_path in enumerate(valid_images[i:i+3]):
                             with cols[j]:
                                 st.image(img_path, caption=f"{os.path.basename(img_path)}", use_container_width=True)
                 
-                # Save to session state with multiple images
-                st.session_state.messages.append({
-                    "role": "assistant", 
-                    "content": response_text, 
-                    "images": valid_images
-                })
+                displayed_content.append(f"Images: {', '.join([os.path.basename(f) for f in valid_images])}")
             
-            # Display HTML files (interactive maps)
+            # Display HTML files
             if html_files:
+                st.write(f"🗺️ **Interactive Map(s):**")
                 for html_path in html_files:
                     try:
                         with open(html_path, 'r') as f:
                             html_content = f.read()
                         st.components.v1.html(html_content, height=600)
+                        st.success(f"📍 Map: {os.path.basename(html_path)}")
                     except Exception as e:
                         st.error(f"❌ Error displaying HTML file {html_path}: {e}")
                 
-                # Add HTML files to session state if we also have images
-                if valid_images:
-                    # Update the last message to include HTML files
-                    st.session_state.messages[-1]["content"] += f"\n\nInteractive maps: {', '.join([os.path.basename(f) for f in html_files])}"
-                else:
-                    # Create new message entry for HTML only
-                    st.session_state.messages.append({
-                        "role": "assistant", 
-                        "content": response_text + f"\n\nInteractive maps: {', '.join([os.path.basename(f) for f in html_files])}"
-                    })
+                displayed_content.append(f"Maps: {', '.join([os.path.basename(f) for f in html_files])}")
             
-            # If no images found at all
-            if not valid_images and not html_files:
-                st.write("ℹ️ No visualizations generated")
-                st.session_state.messages.append({"role": "assistant", "content": response_text})
+            # Display text files
+            if txt_files:
+                st.write(f"📄 **Analysis Files:**")
+                for txt_path in txt_files:
+                    try:
+                        with open(txt_path, 'r') as f:
+                            txt_content = f.read()
+                        with st.expander(f"📋 {os.path.basename(txt_path)}", expanded=False):
+                            st.text(txt_content)
+                    except Exception as e:
+                        st.error(f"❌ Error displaying text file {txt_path}: {e}")
+                
+                displayed_content.append(f"Analysis: {', '.join([os.path.basename(f) for f in txt_files])}")
+            
+            # 🎯 SINGLE MESSAGE ENTRY - Add everything at once
+            final_content = response_text
+            if displayed_content:
+                final_content += f"\n\n📎 **Generated Files:** {' | '.join(displayed_content)}"
+            
+            message_entry = {
+                "role": "assistant", 
+                "content": final_content
+            }
+            
+            # Add file references for display in chat history
+            if valid_images:
+                message_entry["images"] = valid_images
+            if html_files:
+                message_entry["html_files"] = html_files
+            if txt_files:
+                message_entry["txt_files"] = txt_files
+                
+            st.session_state.messages.append(message_entry)
+
+            if os.path.exists("argo_data.csv"):
+                with open("argo_data.csv", "rb") as f:
+                    st.download_button(
+                        label="Download Last Queried Data (CSV)",
+                        data=f,
+                        file_name="argo_data.csv",
+                        mime="text/csv"
+                    )
