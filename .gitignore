@@ -1,0 +1,5 @@
+.env
+.venv/
+temp.py
+__pycache__/
+out_img
