@@ -84,89 +84,116 @@ def parse_bgc_tool_input(tool_input):
     except json.JSONDecodeError as e:
         raise ValueError(f"Failed to decode JSON from tool input: {s}. Error: {e}")
     
-def generate_data_analysis_summary(user_query):
+def generate_data_analysis_summary(user_query: str) -> str:
     """
-    Generate a detailed analysis summary of the fetched ARGO data using LLM
+    Summarise the filtered ARGO dataset and ask the LLM for an
+    oceanographic interpretation.  Keeps the prompt compact even
+    when the DataFrame is large.
     """
+    if not os.path.exists("argo_data.csv"):
+        return ""
+        
+    df = pd.read_csv("argo_data.csv")
+    if df.empty:
+        return ""
+    
     try:
-        if not os.path.exists("argo_data.csv"):
-            return ""
-        
-        df = pd.read_csv("argo_data.csv")
-        if df.empty:
-            return ""
-        
-        # Calculate statistics for all numeric columns
-        stats_summary = []
-        numeric_columns = df.select_dtypes(include=[np.number]).columns
-        
-        for col in numeric_columns:
-            # Skip columns with all NaN values
-            if df[col].isna().all():
-                continue
-                
-            col_stats = {
-                'column': col,
-                'mean': df[col].mean(),
-                'median': df[col].median(),
-                'std': df[col].std(),
-                'min': df[col].min(),
-                'max': df[col].max(),
-                'count': df[col].count(),
-                'null_count': df[col].isna().sum()
-            }
-            
-            # Calculate mode (most frequent value) - handle potential errors
-            try:
-                mode_result = df[col].mode()
-                if not mode_result.empty:
-                    col_stats['mode'] = mode_result.iloc[0]
-                else:
-                    col_stats['mode'] = "No mode"
-            except:
-                col_stats['mode'] = "Unable to calculate"
-            
-            stats_summary.append(col_stats)
-        
-        # Create a formatted statistics string
-        stats_text = "STATISTICAL SUMMARY OF FETCHED ARGO DATA:\n\n"
-        for stat in stats_summary:
-            stats_text += f"{stat['column']}:\n"
-            stats_text += f"  - Mean: {stat['mean']:.4f}\n"
-            stats_text += f"  - Median: {stat['median']:.4f}\n"
-            stats_text += f"  - Mode: {stat['mode']}\n"
-            stats_text += f"  - Standard Deviation: {stat['std']:.4f}\n"
-            stats_text += f"  - Min: {stat['min']:.4f}\n"
-            stats_text += f"  - Max: {stat['max']:.4f}\n"
-            stats_text += f"  - Valid Count: {stat['count']}\n"
-            stats_text += f"  - Null Count: {stat['null_count']}\n\n"
-        
-        # Prepare prompt for LLM analysis
-        analysis_prompt = f"""
-        Based on the following user query and statistical data from ARGO oceanographic floats, provide a detailed, informative explanation of the oceanographic conditions and patterns observed in this data:
+        numeric_desc = df.describe(include=[np.number]).transpose()  # index = column names
 
-        USER QUERY: {user_query}
+        # Optional: include extra percentiles (10%, 90%) in describe
+        extra_percentiles = df.describe(percentiles=[0.1, 0.9], include=[np.number]).transpose()
+
+        # Convert describe() to a compact markdown table for the LLM
+        stats_md = numeric_desc.round(4).to_markdown()
+
+        # Add valid/null counts & mode as a small table
+        modes = []
+        for col in numeric_desc.index:
+            try:
+                mode_series = df[col].mode(dropna=True)
+                mode_val = mode_series.iloc[0] if not mode_series.empty else ""
+            except Exception:
+                mode_val = ""
+            valid_count = int(df[col].count())
+            null_count = int(len(df) - valid_count)
+            modes.append({"column": col, "mode": mode_val, "valid_count": valid_count, "null_count": null_count})
+
+        modes_df = pd.DataFrame(modes).set_index("column")
+        modes_md = modes_df.to_markdown()
+
+        # Correlation matrix (useful for LLM to spot relationships)
+        if len(numeric_desc.index) >= 2:
+            corr_df = df[numeric_desc.index].corr().round(3)
+            corr_md = corr_df.to_markdown()
+        else:
+            corr_md = ""
+
+        # Compose the stats_text to include the describe table, modes, and correlations
+        stats_text = "### DESCRIPTIVE STATISTICS (df.describe())\n\n"
+        stats_text += stats_md + "\n\n"
+        stats_text += "### MODE & COUNTS\n\n"
+        stats_text += modes_md + "\n\n"
+        if corr_md:
+            stats_text += "### CORRELATION MATRIX\n\n"
+            stats_text += corr_md + "\n\n"
+        # ---------- 2. Monthly aggregates (if DATE present) ----------
+        monthly_text = ""
+        date_col = "DATE"
+        if date_col:
+            # coerce to datetime (safe); you can pass dayfirst=True if your dates are D/M/Y
+            df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+
+            # Drop rows without a valid datetime and set index
+            monthly_df = df.dropna(subset=[date_col]).set_index(date_col)
+
+            if not monthly_df.empty:
+                # only aggregate columns that exist
+                agg_cols = [c for c in ["TEMP", "PSAL", "PRES"] if c in monthly_df.columns]
+                if agg_cols:
+                    monthly_means = (
+                        monthly_df
+                        .resample("M")
+                        .agg({c: "mean" for c in agg_cols})
+                        .head(12)   # limit to first 12 months to keep size small
+                    )
+                    if not monthly_means.empty:
+                        monthly_text = "### FIRST 12 MONTHLY MEANS (TEMP/PSAL/PRES)\n"
+                        monthly_text += monthly_means.round(4).to_markdown() + "\n\n"
+
+        # ---------- 3. Random sample of rows (max 200) ----------
+        sample_text = ""
+        if len(df) > 0:
+            sample_df = df.sample(n=min(200, len(df)), random_state=42)
+            # Keep only key columns to reduce size
+            key_cols = [c for c in ["DATE", "LATITUDE", "LONGITUDE", "TEMP", "PSAL", "PRES"] if c in sample_df.columns]
+            sample_text = "### RANDOM SAMPLE (up to 200 rows)\n"
+            sample_text += sample_df[key_cols].to_markdown(index=False) + "\n\n"
+
+        # ---------- 4. Compose final prompt ----------
+        analysis_prompt = f"""
+        Based on the following user query and ARGO float data, provide a concise but
+        scientifically sound oceanographic analysis.
+
+        USER QUERY:
+        {user_query}
 
         {stats_text}
+        {monthly_text}
+        {sample_text}
 
-        Please provide an insightful analysis that:
-        1. Explains what these statistics reveal about the oceanographic conditions
-        2. Interprets the temperature, salinity, and pressure patterns if present
-        3. Discusses any notable characteristics or anomalies in the data
-        4. Relates the findings to typical ocean conditions for the queried region/parameters
-        5. Provides context about what these measurements mean for ocean science
-
-        Keep the explanation accessible but scientifically accurate, and focus on the oceanographic significance of the data.
+        Please discuss:
+        1. What these statistics reveal about temperature, salinity, and pressure.
+        2. Any seasonal trends or anomalies.
+        3. How these values compare with typical ocean conditions for this region/time.
         """
-        
         # Initialize LLM for analysis
+        print(analysis_prompt)
         analysis_llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
         
         # Get analysis from LLM
         analysis_response = analysis_llm.invoke(analysis_prompt)
         
         return f"\n\n📊 **DATA ANALYSIS SUMMARY:**\n{analysis_response.content}"
-        
     except Exception as e:
         return f"\n\n⚠️ Could not generate data analysis summary: {str(e)}"
 
@@ -174,50 +201,68 @@ def generate_data_analysis_summary(user_query):
 @tool()
 def fetch_argo_data_by_region_plot(tool_input):
     """
-    Flexible ARGO data fetching tool that can handle:
-    - Single coordinates (lat, lon) or bounding box (lat_min, lat_max, lon_min, lon_max)
-    - Any ARGO parameters as filters: CYCLE_NUMBER, DATA_MODE, PLATFORM_NUMBER, etc.
-    - Optional depth and time constraints
-    - Parameter-based searches (TEMP, PSAL, PRES, etc.)
-    - This are the overall params that we have argo_params=["CYCLE_NUMBER", "DATA_MODE", "DIRECTION", "PLATFORM_NUMBER","POSITION_QC", "PRES", "PRES_ERROR", "PRES_QC","PSAL", "PSAL_ERROR", "PSAL_QC","TEMP", "TEMP_ERROR", "TEMP_QC","TIME_QC", "LATITUDE", "LONGITUDE", "TIME"]
-    
-    Examples:
-    {"lat": 15.5, "lon": 88.2} - Single point
-    {"lat_min": 10, "lat_max": 20, "lon_min": 80, "lon_max": 90} - Bounding box
-    {"platform_number": "2903334"} - Specific float
-    {"temp_min": 20, "temp_max": 30} - Temperature range
-    {"plot":True} or {"plot":False} - Whether to generate a plot if user asked or if possible for the given query then suggested
-    this are the possible plots available-["scatter","scatter_3d","scatter_polar","scatter_ternary","line","line_3d","line_polar","area","bar","histogram","violin","box","strip","pie","sunburst","treemap","icicle","funnel","funnel_area","density_contour","density_heatmap","scatter_geo","choropleth","choropleth_mapbox","scatter_mapbox","density_mapbox","parallel_coordinates","parallel_categories","imshow"]
-    The plot option should be in this format :
-    while chossing the params like x,y take this points in mind :• Use only these numeric parameters for x–y axes:
-    ["PRES","PRES_ERROR","PSAL","PSAL_ERROR","TEMP","TEMP_ERROR","LATITUDE","LONGITUDE","CYCLE_NUMBER","PLATFORM_NUMBER"]
+    Fetch ARGO data and optionally generate high-quality visualizations.
 
-    • DATE can be x but not y.
+    INPUT (JSON)
+    - either {"lat":..,"lon":..} OR bounding box {"lat_min":..,"lat_max":..,"lon_min":..,"lon_max":..}
+    - platform_number, cycle_number, temp_min, temp_max, pres_min, pres_max, date_start, date_end, data_mode, etc. as a parameter.
+    - if plot is requested or suitable then:
+        "plot": true|false
+        "plot_print": [   # REQUIRED when plot=true (see rules)
+            { "type": "<plotly_type>", "x": "<column>", "y": "<column>", ...optional params... },
+            ...
+        ]
 
-    • DATA_MODE, DIRECTION, POSITION_QC, *_QC fields are categorical and
-    may be used only on the x-axis of bar/histogram/box/violin/strip plots.
+    AVAILABLE COLUMNS (argo_params)
+    ["CYCLE_NUMBER","DATA_MODE","DIRECTION","PLATFORM_NUMBER","POSITION_QC",
+    "PRES","PRES_ERROR","PRES_QC","PSAL","PSAL_ERROR","PSAL_QC",
+    "TEMP","TEMP_ERROR","TEMP_QC","TIME_QC","LATITUDE","LONGITUDE","TIME"]
 
-    • Never pair LATITUDE vs LONGITUDE and TIME as a parameter unless the lat and log plot type is one of:
-    ["scatter_geo","choropleth","choropleth_mapbox","scatter_mapbox"]..
+    GENERAL RULES (strict)
+    1. If "plot": true → "plot_print" must be present and must contain **at least 3 valid plot objects** unless the fetched data cannot be meaningfully visualized.
+    2. Each plot object must be a dict with "type" (one of supported plotly types) and the columns ("x" and/or "y") required by that plot type.
+    3. Validate columns exist in the fetched dataframe before plotting. If a requested column is missing, skip that plot and explain why.
+    4. Do not propose redundant plots: if two plot types convey essentially the same view (e.g., "strip" vs "scatter" for the same numeric pair and grouping), include only one.
+    5. When plot generation times out or a network error occurs, first reduce date range; if still failing, reduce bounding box. Return the attempted change and retry.
 
-    • Each plot must respect these rules or it is invalid.
+    COLUMN USAGE GUIDELINES
+    - Numeric / continuous (suitable for x/y): PRES, PRES_ERROR, PSAL, PSAL_ERROR, TEMP, TEMP_ERROR, LATITUDE*, LONGITUDE*, CYCLE_NUMBER*, PLATFORM_NUMBER*
+    * LATITUDE/LONGITUDE are numeric but should only be used together for geoplots (see below)
+    * CYCLE_NUMBER / PLATFORM_NUMBER are primarily for grouping/coloring, not continuous trends
+    - Date: TIME → allowed as x (for time series), not as y
+    - Categorical: DATA_MODE, DIRECTION, POSITION_QC, *_QC → use for color/facet/x (bar/box/violin/histogram), not for continuous y in line plots
 
-    {"plot_print": [          # REQUIRED if plot=true
-        {
-          "type": "<plotly_type>",      # can have any one most suitable of the plot available in the above list
-          "x": "<column_name>",         # which agro param based on the query 
-          "y": "<column_name>",         # which agro param based on the query
-        },
-        ...
-    ]}
+    PLOT TYPE → REQUIRED COLUMNS / RECOMMENDED USAGE (examples)
+    - ******Dont take a random guess on chossing the x and y becuase the plot will not make any sense so be carefull******
+    - scatter, line: numeric x & y (e.g., TEMP vs PSAL; TEMP vs PRES). For line representing vertical profiles: **group by CYCLE_NUMBER or PLATFORM_NUMBER and sort by PRES**; reverse y-axis so depth increases downward.
+    - histogram, density_heatmap: single numeric x (histogram), numeric x & y pairs for density_heatmap.
+    - box, violin: categorical x (DATA_MODE / PLATFORM_NUMBER / CYCLE_NUMBER) and numeric y (TEMP/PSAL).
+    - scatter_geo, scatter_mapbox, choropleth*, density_mapbox: require LATITUDE & LONGITUDE (and value column for choropleth).
+    - parallel_coordinates, parallel_categories: multivariate views of several numeric/categorical vars.
+    - imshow: 2D matrix (only if user provides gridded data or derived matrix, otherwise skip).
 
-    whenever plot is True plot_opt must be provided and x and y must be provided
-    In plot_opt the minimum number of plots is 3 for the user prompt unless the query doesnt be explained in visula,for the data fetched the best three plots will be generated.
-    Make sure to provide valid parameters for x and y that exist in the fetched data.
-    Make sure to include only those plot options int plot_print which are neccesary for the data fetched and are valid for the data fetched. We dont want to maximize the number of plots but we want to provide the best possible plots for the data fetched.
-    We need to make sure to optimize the number of plots and the quality of plots.Such that the user is not overwhelmed with too many plots and the plots provided are of high quality and provide good insights about the data fetched.
-    If there is a timeout error while fetching the data,then first prioritize decreasing the date range to fetch the data to a smaller range and then if the error still persists then prioritize decreasing the bounding box to a smaller box.
-    Returns a image path.
+    CHOOSING THE BEST PLOTS (heuristics; agent must follow)
+    1. Pick plots that match data types (continuous vs categorical vs geospatial).
+    2. Always include at least one distribution plot (histogram/box/violin) for a main numeric variable (TEMP or PSAL).
+    3. If spatial coverage exists, include one geospatial view (scatter_geo or density_mapbox) when LAT/LON present.
+    4. If profiles exist (CYCLE_NUMBER or PLATFORM_NUMBER present and PRES available), include one profile view: TEMP vs PRES grouped by CYCLE_NUMBER (line per profile) OR scatter of TEMP vs PRES.
+    5. Add one relational plot (e.g., TEMP vs PSAL scatter / density) to show physical relationships (T–S diagram).
+    6. Minimum = 3 plots; if user supplied more valid specs, generate all valid and non-redundant ones.
+
+    VALIDATION BEFORE PLOTTING
+    - Confirm each plot's required columns exist and are numeric where needed.
+    - For line/profile plots: ensure grouping exists (CYCLE_NUMBER or PLATFORM_NUMBER) and sort by PRES per group; otherwise convert to scatter.
+    - For geo plots: require both LATITUDE and LONGITUDE.
+
+    RETURN
+    - Return a list of generated image paths and brief notes describing which plots were created and any skipped due to invalid columns or redundancy.
+
+    EXAMPLE plot_print:
+    "plot_print": [
+    {"type":"scatter","x":"TEMP","y":"PSAL"},
+    {"type":"scatter_geo","x":"LONGITUDE","y":"LATITUDE"},
+    {"type":"line","x":"TEMP","y":"PRES"}   # agent must group by CYCLE_NUMBER when making this line plot
+    ]
     """
     try:
         parsed = parse_action_input(tool_input)
